@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# --------------------------------------------------------------
-# Receding‑horizon NMPC for fixed‑wing landing – acados
-# --------------------------------------------------------------
-import numpy as np, casadi as ca
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+# ------------------------------------------------------------------
+# Fixed‑wing landing NMPC with ellipsoidal obstacle avoidance
+# Compatible with acados template versions ≤2023‑10 and ≥2024‑xx
+# ------------------------------------------------------------------
+import numpy as np
+import casadi as ca
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 # ------------------------------------------------------------------
@@ -43,7 +43,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     nx, nu = 6, 3
 
     # ---------- horizon --------------------------------------------
-    Tf, N = 1.0, 10
+    Tf, N = 20.0, 20
     ocp.solver_options.tf = Tf
     if hasattr(ocp.dims, "N_horizon"):
         ocp.dims.N_horizon = N
@@ -52,11 +52,11 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
 
     # integrator & QP solver
     ocp.solver_options.integrator_type = "ERK"
-    #ocp.solver_options.num_stages, ocp.solver_options.num_steps = 4, 5
+    # ocp.solver_options.num_stages, ocp.solver_options.num_steps = 4, 5
     ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # supports one‑sided
 
     # ---------- cost (linear LS) -----------------------------------
-    Q = np.diag([0., 10, 10, 1., 100., 100.])
+    Q = np.diag([0., 10., 10., 1., 10., 10.])
     R = np.diag([0.1, 0.1, 1])
     ny, ny_e = nx + nu, nx
 
@@ -73,11 +73,11 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     ocp.cost.yref_e = np.zeros(ny_e)
 
     # ---------- box constraints ------------------------------------
-    u_min = np.array([-0.1, -3., -np.pi/4]);  u_max = -u_min
+    u_min = np.array([-0.5, -3., -np.pi/4]);  u_max = -u_min
     ocp.constraints.lbu, ocp.constraints.ubu = u_min, u_max
     ocp.constraints.idxbu = np.arange(nu)
 
-    x_min = np.array([-2000, -2000, 0.0,  50, -np.pi, -np.deg2rad(20)])
+    x_min = np.array([-2000, -2000, 0,  50, -np.pi, -np.deg2rad(20)])
     x_max = np.array([ 2000,  2000,  2000, 100,  np.pi,  np.deg2rad(20)])
     ocp.constraints.lbx, ocp.constraints.ubx = x_min, x_max
     ocp.constraints.idxbx = np.arange(nx)
@@ -90,7 +90,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     # ---------- ellipsoidal obstacles ------------------------------
     radii   = np.array([10., 10., 10.])
     centers = np.array([[400, 2.5, 0], [600,-3,0], [500,12,0],
-                        [200, 6 , 0], [100,-3,0]])
+                        [200, 6 , 0], [100,-3,0], [500,-3,0]])
     phi = [((model.sym_x[0]-cx)/radii[0])**2 +
            ((model.sym_x[1]-cy)/radii[1])**2 +
            ((model.sym_x[2]-cz)/radii[2])**2 for cx,cy,cz in centers]
@@ -116,41 +116,24 @@ def build_solver(ocp: AcadosOcp) -> AcadosOcpSolver:
     return AcadosOcpSolver(ocp, json_file=json)
 
 # ------------------------------------------------------------------
-# 3) numpy RK4 for plant simulation
-# ------------------------------------------------------------------
-def f_np(x,u):
-    g = 9.81
-    V, psi, gamma = x[3], x[4], x[5]
-    n_x, n_z, mu = u
-    return np.array([
-        V*np.cos(psi)*np.cos(gamma),
-        V*np.sin(psi)*np.cos(gamma),
-        V*np.sin(gamma),
-        g*(n_x - np.sin(gamma)),
-        g*n_z/V*np.sin(mu)/np.cos(gamma),
-        g/V*(n_z*np.cos(mu) - np.cos(gamma))
-    ], dtype=float)
-
-def rk4_np(x,u,dt):
-    k1=f_np(x,u); k2=f_np(x+dt/2*k1,u)
-    k3=f_np(x+dt/2*k2,u); k4=f_np(x+dt*k3,u)
-    return x + dt/6*(k1+2*k2+2*k3+k4)
-
-# ------------------------------------------------------------------
-# 4) closed‑loop MPC simulation
+# 4)  Main
 # ------------------------------------------------------------------
 if __name__ == "__main__":
-    model = build_model()
-    ocp   = build_ocp(model)
-    solver= build_solver(ocp)
+    import time
+    model  = build_model()
+    ocp    = build_ocp(model)
+    solver = build_solver(ocp)
 
-    x0   = np.array([0., 0., 100., 70., 0., -0.05])
+    x0   = np.array([-1000., 100., 500., 70., 0., -0.05])
     xdes = np.array([1000., 0., 0., 0., 0., 0.])
 
     # horizon length (old vs new name)
     N = ocp.dims.N if hasattr(ocp.dims, "N") else ocp.dims.N_horizon
     nx, nu = 6, 3
 
+    # hard‑fix initial state
+    solver.set(0, "lbx", x0)
+    solver.set(0, "ubx", x0)
 
     # running & terminal references
     for k in range(N):
@@ -160,63 +143,80 @@ if __name__ == "__main__":
     solver.set(N, "y_ref", xdes)        # <‑‑ terminal stage uses same key
     solver.set(N, "x", x0)
 
+    t_start = time.time()
+    solver.solve()
+    t_end = time.time()
+    print("Solver time = %.3f ms" % ((t_end - t_start) * 1000))
+    print("Optimal cost =", solver.get_cost())
 
-    x = x0.copy()
-    dt = 0.01
-    steps = 1000
-    X_hist = [x.copy()]; U_hist = []
-    for k in range(steps):
-        # initial‑state hard constraint
-        solver.set(0,"lbx",x); solver.set(0,"ubx",x)
+    X = np.vstack([solver.get(k, "x") for k in range(N+1)])
+    print(X)
+    U = np.vstack([solver.get(k, "u") for k in range(N)])
+    np.savez("landing_solution.npz", X=X, U=U)
+    print("Saved landing_solution.npz")
 
-        # set references
-        # for i in range(N):
-        #     solver.set(i,"y_ref", np.hstack((x_des, np.zeros(nu))))
-        solver.solve()
-        # if solver.solve() != 0:
-        #     raise RuntimeError(f"acados failed at step {k}")
-        u0 = solver.get(0,"u")
-        U_hist.append(u0.copy())
+    import matplotlib.pyplot as plt
+    N = U.shape[0]
+    Tf = 20.0
+    dt = Tf / N
+    t = np.arange(N) * dt
+
+    # State components
+    x, y, h, V, psi, gamma = X.T
+    n_x, n_z, mu = U.T
+
+    # 1) 3‑D trajectory --------------------------------------------------
+    fig1 = plt.figure(figsize=(8, 6))
+    ax1 = fig1.add_subplot(111, projection="3d")
+    ax1.plot(x, y, h, marker="o")
+    ax1.set_xlabel("x [m]")
+    ax1.set_ylabel("y [m]")
+    ax1.set_zlabel("h [m]")
+    ax1.set_title("Optimal landing trajectory (acados)")
+
+    # 2) altitude vs ground‑track ---------------------------------------
+    fig2 = plt.figure()
+    plt.plot(x, h, marker="o")
+    plt.xlabel("x [m]")
+    plt.ylabel("Altitude h [m]")
+    plt.title("Altitude profile along x")
+    plt.grid(True)
+
+    # 3) control inputs over time ---------------------------------------
+    fig3 = plt.figure()
+    plt.step(t, n_x, label="n_x")
+    plt.step(t, n_z, label="n_z")
+    plt.step(t, mu, label="mu [rad]")
+    plt.xlabel("time [s]")
+    plt.ylabel("Control inputs")
+    plt.title("Applied controls vs time")
+    plt.legend()
+    plt.grid(True)
+
+    fig1 = plt.figure(figsize=(8, 6))
+    ax1 = fig1.add_subplot(111, projection="3d")
+    ax1.plot(x, y, h, marker="o", label='trajectory')
+
+    # -------- ellipsoids ------------ (new)
+    radii   = np.array([10., 10., 10.])
+    centers = np.array([[400, 2.5, 0], [600,-3,0], [500,12,0],
+                        [200, 6 , 0], [100,-3,0], [500,-3,0]])
+    u = np.linspace(0, 2*np.pi, 24)
+    v = np.linspace(0,     np.pi, 12)
+    uu, vv = np.meshgrid(u, v)
+    for cx, cy, cz in centers:
+        xs = radii[0]*np.cos(uu)*np.sin(vv) + cx
+        ys = radii[1]*np.sin(uu)*np.sin(vv) + cy
+        zs = radii[2]*np.cos(vv)            + cz
+        ax1.plot_surface(xs, ys, zs, color='crimson',
+                        alpha=0.3, linewidth=0)
+    # --------------------------------
+
+    ax1.set_xlabel("x [m]"); ax1.set_ylabel("y [m]"); ax1.set_zlabel("h [m]")
+    ax1.set_title("Optimal landing trajectory with obstacles")
+    ax1.legend()
+
+    plt.show()
 
 
-        # simulate plant
-        x = rk4_np(x,u0,dt)
-        X_hist.append(x.copy())
-
-        # warm‑start:  shift previous solution
-        for i in range(N-1):
-            solver.set(i, "x", solver.get(i+1,"x"))
-            solver.set(i, "u", solver.get(i+1,"u"))
-            print(solver.get(i,"x"))
-        solver.set(N-1, "u", solver.get(N-2,"u"))
-
-    X_hist = np.array(X_hist); U_hist = np.array(U_hist)
-    xg, yg, hg = X_hist[:,0], X_hist[:,1], X_hist[:,2]
-    n_x, n_z, mu = U_hist.T
-    time = np.arange(steps)*dt
-
-    # --------------------------------------------------------------
-    # 5) plotting
-    # --------------------------------------------------------------
-    fig = plt.figure(figsize=(8,6)); ax = fig.add_subplot(111,projection='3d')
-    ax.plot(xg, yg, hg, marker='o', label="trajectory")
-
-    # plot ellipsoids
-    radii = np.array([10,10,10])
-    centers = np.array([[400, 2.5, 0], [600, -3, 0], [500, 12, 0],
-                        [200,  6, 0],  [100, -3, 0]])
-    u_mesh = np.linspace(0,2*np.pi,24); v_mesh = np.linspace(0,np.pi,12)
-    uu,vv = np.meshgrid(u_mesh,v_mesh)
-    for cx,cy,cz in centers:
-        xs = radii[0]*np.cos(uu)*np.sin(vv)+cx
-        ys = radii[1]*np.sin(uu)*np.sin(vv)+cy
-        zs = radii[2]*np.cos(vv)+cz
-        ax.plot_surface(xs,ys,zs,color='crimson',alpha=0.3,linewidth=0)
-    ax.set_xlabel('x [m]'); ax.set_ylabel('y [m]'); ax.set_zlabel('h [m]')
-    ax.set_title("Closed‑loop trajectory with obstacles"); ax.legend()
-
-    plt.figure(); plt.step(time,n_x,label='n_x')
-    plt.step(time,n_z,label='n_z'); plt.step(time,mu,label='μ [rad]')
-    plt.xlabel('time [s]'); plt.ylabel('control'); plt.legend(); plt.grid(True)
-    plt.title("Applied control inputs")
-    plt.tight_layout(); plt.show()
+    

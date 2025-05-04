@@ -619,6 +619,8 @@ void landing_acados_setup_nlp_in(landing_solver_capsule* capsule, const int N, d
     double* lubu = calloc(2*NBU, sizeof(double));
     double* lbu = lubu;
     double* ubu = lubu + NBU;
+    lbu[0] = -0.5;
+    ubu[0] = 0.5;
     lbu[1] = -3;
     ubu[1] = 3;
     lbu[2] = -0.7853981633974483;

@@ -59,7 +59,7 @@ class LandingNMPC:
             {'center': np.array([500, 12.0, 0]), 'axes': car_size},
             {'center': np.array([200, 6.0, 0]), 'axes': car_size},
             {'center': np.array([100, -3.0, 0]), 'axes': car_size},
-            {'center': np.array([500, -3.0, 0]), 'axes': car_size}
+            {'center': np.array([1000, -3.0, 0]), 'axes': car_size}
         ]
 
     def build_integrator(self):
@@ -98,9 +98,14 @@ class LandingNMPC:
         for k in range(self.N):
             Uk = cs.MX.sym(f'U_{k}', 3)
             w += [Uk]
-            lbw += self.min_u
-            ubw += self.max_u
-            w0 += [0.0, 0.0, 0.0]
+            if k < 20:
+                lbw += self.min_u
+                ubw += self.max_u
+                w0 += [0.0, 0.0, 0.0]
+            else:
+                lbw += [-1,self.min_u[1], -np.pi/6]
+                ubw += [1,self.max_u[1], np.pi/6]
+                w0 += [0.0, 0.0, 0.0]
 
             Fk = self.integrator(x0=Xk, p=Uk)
             Xk_end = Fk['xf']
@@ -108,10 +113,14 @@ class LandingNMPC:
 
             Xk = cs.MX.sym(f'X_{k+1}', 6)
             w += [Xk]
-            lbw += [-2000, -2000, 0, 50, -3.14, -np.deg2rad(20)]
-            ubw += [2000, 2000, 2000, 100, 3.14, np.deg2rad(20)]
-            w0 += [0, 0, 0, 70, 0, 0.0]
-
+            if k < 20:
+                lbw += [-2000, -2000, 0, 50*cs.sign(Xk[3] > 1), -3.14, -np.deg2rad(20)]
+                ubw += [2000, 2000, 2000, 100, 3.14, np.deg2rad(20)]
+                w0 += [0, 0, 0, 70, 0, 0.0]
+            else:
+                lbw += [-2000, -2000, 0, 1, -3.14, -np.deg2rad(20)]
+                ubw += [2000, 2000, 2000, 100, 3.14, np.deg2rad(20)]
+                w0 += [0, 0, 0, 70, 0, 0.0]
             g += [Xk_end - Xk]
             lbg += [0.0]*6
             ubg += [0.0]*6
@@ -135,16 +144,16 @@ class LandingNMPC:
 #%% Main function to run the NMPC
 if __name__ == "__main__":
     T = 20.0
-    N = 20
-    m_steps = 5
+    N = 40
+    m_steps = 4
     q_diag = [0.0, 0.005, 0.01, 0, 20, 10]
     r_diag = [0.1, 0.1, 0.1]
     acc_limits = np.array([0.1, 3.0, np.pi/4])
 
     nmpc = LandingNMPC(T, N, m_steps, q_diag, r_diag, acc_limits)
 
-    x0 = np.array([-200, 500, 100, 70, 0, -0.05])
-    x_target = np.array([1000, 0, 0, 0, 0, 0])
+    x0 = np.array([-200, 500, 100, 70, -np.pi/4, -0.05])
+    x_target = np.array([1000, 0, 0, 1, 0, 0])
 
     w_opt = nmpc.solve(x0, x_target)
 
@@ -176,6 +185,13 @@ if __name__ == "__main__":
     plt.xlabel('x (m)')
     plt.ylabel('Altitude (m)')
     plt.title('Altitude Profile During Landing')
+    plt.grid(True)
+
+    plt.figure()
+    plt.plot( y_opt, marker='o')
+    plt.xlabel('N')
+    plt.ylabel('Y (m)')
+    plt.title('Y Profile During Landing')
     plt.grid(True)
 
     plt.figure()
