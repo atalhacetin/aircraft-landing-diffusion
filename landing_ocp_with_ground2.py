@@ -29,7 +29,7 @@ class LandingNMPC:
         self.dt = T/(N*M)
         self.Q = cs.diag(q_diag); self.R = cs.diag(r_diag)
         self.u_min = [-0.6, -u_bounds[1], -u_bounds[2]]
-        self.u_max = [ 1.0,  u_bounds[1],  u_bounds[2]]
+        self.u_max = [ 1,  u_bounds[1],  u_bounds[2]]
         self.ellipsoids = ellipsoids
         self.car_velocity = car_velocity
 
@@ -92,12 +92,12 @@ if __name__=="__main__":
 
     # build MPC
     T,N,M=20.0,40,4
-    Qd=[0,0.01,0.01,0,20,10]; Rd=[0.1,0.1,1]
+    Qd=[0,0.01,0.01,0.001,20,10]; Rd=[0.1,0.1,1]
     u_bounds=np.array([0.1,3.0,np.pi/4])
     nmpc=LandingNMPC(T,N,M,Qd,Rd,u_bounds,ellipsoids,car_vel)
 
     # initial & target
-    x0=np.array([-200,-500,100,70,np.pi/4,-0.05])
+    x0=np.array([-200,-500,100,70,-np.pi/4,-0.05])
     xT=np.array([1000,0,0,1,0,0])
     sol=nmpc.solve(x0,xT)
 

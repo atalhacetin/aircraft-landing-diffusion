@@ -73,7 +73,7 @@ int landing_acados_sim_create(landing_sim_solver_capsule * capsule)
     const int np = LANDING_NP;
     bool tmp_bool;
 
-    double Tsim = 1;
+    double Tsim = 0.5;
 
     external_function_opts ext_fun_opts;
     external_function_opts_set_to_default(&ext_fun_opts);

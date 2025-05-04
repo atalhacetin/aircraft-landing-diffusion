@@ -64,7 +64,7 @@
 #define LANDING_NY0    9
 #define LANDING_NY     9
 #define LANDING_NYN    6
-#define LANDING_N      20
+#define LANDING_N      40
 #define LANDING_NH     6
 #define LANDING_NHN    0
 #define LANDING_NH0    0

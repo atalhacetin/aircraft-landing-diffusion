@@ -43,7 +43,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     nx, nu = 6, 3
 
     # ---------- horizon --------------------------------------------
-    Tf, N = 20.0, 20
+    Tf, N = 20.0, 40
     ocp.solver_options.tf = Tf
     if hasattr(ocp.dims, "N_horizon"):
         ocp.dims.N_horizon = N
@@ -56,7 +56,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # supports one‑sided
 
     # ---------- cost (linear LS) -----------------------------------
-    Q = np.diag([0., 10., 10., 1., 10., 10.])
+    Q = np.diag([0., 0.01, 0.01, 0.001, 20., 10.])
     R = np.diag([0.1, 0.1, 1])
     ny, ny_e = nx + nu, nx
 

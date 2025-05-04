@@ -39,88 +39,88 @@
 
 // example specific
 
-#include "landing_model/landing_model.h"
+#include "landing2_model/landing2_model.h"
 
 
-#include "landing_constraints/landing_constraints.h"
+#include "landing2_constraints/landing2_constraints.h"
 
 
 
-#include "acados_solver_landing.h"
+#include "acados_solver_landing2.h"
 
-#define NX     LANDING_NX
-#define NZ     LANDING_NZ
-#define NU     LANDING_NU
-#define NP     LANDING_NP
-#define NP_GLOBAL     LANDING_NP_GLOBAL
-#define NY0    LANDING_NY0
-#define NY     LANDING_NY
-#define NYN    LANDING_NYN
+#define NX     LANDING2_NX
+#define NZ     LANDING2_NZ
+#define NU     LANDING2_NU
+#define NP     LANDING2_NP
+#define NP_GLOBAL     LANDING2_NP_GLOBAL
+#define NY0    LANDING2_NY0
+#define NY     LANDING2_NY
+#define NYN    LANDING2_NYN
 
-#define NBX    LANDING_NBX
-#define NBX0   LANDING_NBX0
-#define NBU    LANDING_NBU
-#define NG     LANDING_NG
-#define NBXN   LANDING_NBXN
-#define NGN    LANDING_NGN
+#define NBX    LANDING2_NBX
+#define NBX0   LANDING2_NBX0
+#define NBU    LANDING2_NBU
+#define NG     LANDING2_NG
+#define NBXN   LANDING2_NBXN
+#define NGN    LANDING2_NGN
 
-#define NH     LANDING_NH
-#define NHN    LANDING_NHN
-#define NH0    LANDING_NH0
-#define NPHI   LANDING_NPHI
-#define NPHIN  LANDING_NPHIN
-#define NPHI0  LANDING_NPHI0
-#define NR     LANDING_NR
+#define NH     LANDING2_NH
+#define NHN    LANDING2_NHN
+#define NH0    LANDING2_NH0
+#define NPHI   LANDING2_NPHI
+#define NPHIN  LANDING2_NPHIN
+#define NPHI0  LANDING2_NPHI0
+#define NR     LANDING2_NR
 
-#define NS     LANDING_NS
-#define NS0    LANDING_NS0
-#define NSN    LANDING_NSN
+#define NS     LANDING2_NS
+#define NS0    LANDING2_NS0
+#define NSN    LANDING2_NSN
 
-#define NSBX   LANDING_NSBX
-#define NSBU   LANDING_NSBU
-#define NSH0   LANDING_NSH0
-#define NSH    LANDING_NSH
-#define NSHN   LANDING_NSHN
-#define NSG    LANDING_NSG
-#define NSPHI0 LANDING_NSPHI0
-#define NSPHI  LANDING_NSPHI
-#define NSPHIN LANDING_NSPHIN
-#define NSGN   LANDING_NSGN
-#define NSBXN  LANDING_NSBXN
+#define NSBX   LANDING2_NSBX
+#define NSBU   LANDING2_NSBU
+#define NSH0   LANDING2_NSH0
+#define NSH    LANDING2_NSH
+#define NSHN   LANDING2_NSHN
+#define NSG    LANDING2_NSG
+#define NSPHI0 LANDING2_NSPHI0
+#define NSPHI  LANDING2_NSPHI
+#define NSPHIN LANDING2_NSPHIN
+#define NSGN   LANDING2_NSGN
+#define NSBXN  LANDING2_NSBXN
 
 
 
 // ** solver data **
 
-landing_solver_capsule * landing_acados_create_capsule(void)
+landing2_solver_capsule * landing2_acados_create_capsule(void)
 {
-    void* capsule_mem = malloc(sizeof(landing_solver_capsule));
-    landing_solver_capsule *capsule = (landing_solver_capsule *) capsule_mem;
+    void* capsule_mem = malloc(sizeof(landing2_solver_capsule));
+    landing2_solver_capsule *capsule = (landing2_solver_capsule *) capsule_mem;
 
     return capsule;
 }
 
 
-int landing_acados_free_capsule(landing_solver_capsule *capsule)
+int landing2_acados_free_capsule(landing2_solver_capsule *capsule)
 {
     free(capsule);
     return 0;
 }
 
 
-int landing_acados_create(landing_solver_capsule* capsule)
+int landing2_acados_create(landing2_solver_capsule* capsule)
 {
-    int N_shooting_intervals = LANDING_N;
+    int N_shooting_intervals = LANDING2_N;
     double* new_time_steps = NULL; // NULL -> don't alter the code generated time-steps
-    return landing_acados_create_with_discretization(capsule, N_shooting_intervals, new_time_steps);
+    return landing2_acados_create_with_discretization(capsule, N_shooting_intervals, new_time_steps);
 }
 
 
-int landing_acados_update_time_steps(landing_solver_capsule* capsule, int N, double* new_time_steps)
+int landing2_acados_update_time_steps(landing2_solver_capsule* capsule, int N, double* new_time_steps)
 {
 
     if (N != capsule->nlp_solver_plan->N) {
-        fprintf(stderr, "landing_acados_update_time_steps: given number of time steps (= %d) " \
+        fprintf(stderr, "landing2_acados_update_time_steps: given number of time steps (= %d) " \
             "differs from the currently allocated number of " \
             "time steps (= %d)!\n" \
             "Please recreate with new discretization and provide a new vector of time_stamps!\n",
@@ -142,9 +142,9 @@ int landing_acados_update_time_steps(landing_solver_capsule* capsule, int N, dou
 }
 
 /**
- * Internal function for landing_acados_create: step 1
+ * Internal function for landing2_acados_create: step 1
  */
-void landing_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, const int N)
+void landing2_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, const int N)
 {
     assert(N == nlp_solver_plan->N);
 
@@ -182,7 +182,7 @@ void landing_acados_create_set_plan(ocp_nlp_plan_t* nlp_solver_plan, const int N
 }
 
 
-static ocp_nlp_dims* landing_acados_create_setup_dimensions(landing_solver_capsule* capsule)
+static ocp_nlp_dims* landing2_acados_create_setup_dimensions(landing2_solver_capsule* capsule)
 {
     ocp_nlp_plan_t* nlp_solver_plan = capsule->nlp_solver_plan;
     const int N = nlp_solver_plan->N;
@@ -315,9 +315,9 @@ static ocp_nlp_dims* landing_acados_create_setup_dimensions(landing_solver_capsu
 
 
 /**
- * Internal function for landing_acados_create: step 3
+ * Internal function for landing2_acados_create: step 3
  */
-void landing_acados_create_setup_functions(landing_solver_capsule* capsule)
+void landing2_acados_create_setup_functions(landing2_solver_capsule* capsule)
 {
     const int N = capsule->nlp_solver_plan->N;
 
@@ -343,11 +343,11 @@ void landing_acados_create_setup_functions(landing_solver_capsule* capsule)
     // constraints.constr_type == "BGH" and dims.nh > 0
     capsule->nl_constr_h_fun_jac = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*(N-1));
     for (int i = 0; i < N-1; i++) {
-        MAP_CASADI_FNC(nl_constr_h_fun_jac[i], landing_constr_h_fun_jac_uxt_zt);
+        MAP_CASADI_FNC(nl_constr_h_fun_jac[i], landing2_constr_h_fun_jac_uxt_zt);
     }
     capsule->nl_constr_h_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*(N-1));
     for (int i = 0; i < N-1; i++) {
-        MAP_CASADI_FNC(nl_constr_h_fun[i], landing_constr_h_fun);
+        MAP_CASADI_FNC(nl_constr_h_fun[i], landing2_constr_h_fun);
     }
 
 
@@ -357,17 +357,17 @@ void landing_acados_create_setup_functions(landing_solver_capsule* capsule)
     // explicit ode
     capsule->expl_vde_forw = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
     for (int i = 0; i < N; i++) {
-        MAP_CASADI_FNC(expl_vde_forw[i], landing_expl_vde_forw);
+        MAP_CASADI_FNC(expl_vde_forw[i], landing2_expl_vde_forw);
     }
 
     capsule->expl_ode_fun = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
     for (int i = 0; i < N; i++) {
-        MAP_CASADI_FNC(expl_ode_fun[i], landing_expl_ode_fun);
+        MAP_CASADI_FNC(expl_ode_fun[i], landing2_expl_ode_fun);
     }
 
     capsule->expl_vde_adj = (external_function_external_param_casadi *) malloc(sizeof(external_function_external_param_casadi)*N);
     for (int i = 0; i < N; i++) {
-        MAP_CASADI_FNC(expl_vde_adj[i], landing_expl_vde_adj);
+        MAP_CASADI_FNC(expl_vde_adj[i], landing2_expl_vde_adj);
     }
 
 
@@ -377,12 +377,19 @@ void landing_acados_create_setup_functions(landing_solver_capsule* capsule)
 
 
 /**
- * Internal function for landing_acados_create: step 5
+ * Internal function for landing2_acados_create: step 5
  */
-void landing_acados_create_set_default_parameters(landing_solver_capsule* capsule)
+void landing2_acados_create_set_default_parameters(landing2_solver_capsule* capsule)
 {
 
-    // no parameters defined
+    const int N = capsule->nlp_solver_plan->N;
+    // initialize parameters to nominal value
+    double* p = calloc(NP, sizeof(double));
+
+    for (int i = 0; i <= N; i++) {
+        landing2_acados_update_params(capsule, i, p, NP);
+    }
+    free(p);
 
 
     // no global parameters defined
@@ -390,9 +397,9 @@ void landing_acados_create_set_default_parameters(landing_solver_capsule* capsul
 
 
 /**
- * Internal function for landing_acados_create: step 5
+ * Internal function for landing2_acados_create: step 5
  */
-void landing_acados_setup_nlp_in(landing_solver_capsule* capsule, const int N, double* new_time_steps)
+void landing2_acados_setup_nlp_in(landing2_solver_capsule* capsule, const int N, double* new_time_steps)
 {
     assert(N == capsule->nlp_solver_plan->N);
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -414,7 +421,7 @@ void landing_acados_setup_nlp_in(landing_solver_capsule* capsule, const int N, d
     if (new_time_steps)
     {
         // NOTE: this sets scaling and time_steps
-        landing_acados_update_time_steps(capsule, N, new_time_steps);
+        landing2_acados_update_time_steps(capsule, N, new_time_steps);
     }
     else
     {
@@ -747,7 +754,7 @@ void landing_acados_setup_nlp_in(landing_solver_capsule* capsule, const int N, d
 }
 
 
-static void landing_acados_create_set_opts(landing_solver_capsule* capsule)
+static void landing2_acados_create_set_opts(landing2_solver_capsule* capsule)
 {
     const int N = capsule->nlp_solver_plan->N;
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -884,9 +891,9 @@ static void landing_acados_create_set_opts(landing_solver_capsule* capsule)
 
 
 /**
- * Internal function for landing_acados_create: step 7
+ * Internal function for landing2_acados_create: step 7
  */
-void landing_acados_set_nlp_out(landing_solver_capsule* capsule)
+void landing2_acados_set_nlp_out(landing2_solver_capsule* capsule)
 {
     const int N = capsule->nlp_solver_plan->N;
     ocp_nlp_config* nlp_config = capsule->nlp_config;
@@ -916,9 +923,9 @@ void landing_acados_set_nlp_out(landing_solver_capsule* capsule)
 
 
 /**
- * Internal function for landing_acados_create: step 9
+ * Internal function for landing2_acados_create: step 9
  */
-int landing_acados_create_precompute(landing_solver_capsule* capsule) {
+int landing2_acados_create_precompute(landing2_solver_capsule* capsule) {
     int status = ocp_nlp_precompute(capsule->nlp_solver, capsule->nlp_in, capsule->nlp_out);
 
     if (status != ACADOS_SUCCESS) {
@@ -930,14 +937,14 @@ int landing_acados_create_precompute(landing_solver_capsule* capsule) {
 }
 
 
-int landing_acados_create_with_discretization(landing_solver_capsule* capsule, int N, double* new_time_steps)
+int landing2_acados_create_with_discretization(landing2_solver_capsule* capsule, int N, double* new_time_steps)
 {
     // If N does not match the number of shooting intervals used for code generation, new_time_steps must be given.
-    if (N != LANDING_N && !new_time_steps) {
-        fprintf(stderr, "landing_acados_create_with_discretization: new_time_steps is NULL " \
+    if (N != LANDING2_N && !new_time_steps) {
+        fprintf(stderr, "landing2_acados_create_with_discretization: new_time_steps is NULL " \
             "but the number of shooting intervals (= %d) differs from the number of " \
             "shooting intervals (= %d) during code generation! Please provide a new vector of time_stamps!\n", \
-             N, LANDING_N);
+             N, LANDING2_N);
         return 1;
     }
 
@@ -946,37 +953,37 @@ int landing_acados_create_with_discretization(landing_solver_capsule* capsule, i
 
     // 1) create and set nlp_solver_plan; create nlp_config
     capsule->nlp_solver_plan = ocp_nlp_plan_create(N);
-    landing_acados_create_set_plan(capsule->nlp_solver_plan, N);
+    landing2_acados_create_set_plan(capsule->nlp_solver_plan, N);
     capsule->nlp_config = ocp_nlp_config_create(*capsule->nlp_solver_plan);
 
     // 2) create and set dimensions
-    capsule->nlp_dims = landing_acados_create_setup_dimensions(capsule);
+    capsule->nlp_dims = landing2_acados_create_setup_dimensions(capsule);
 
     // 3) create and set nlp_opts
     capsule->nlp_opts = ocp_nlp_solver_opts_create(capsule->nlp_config, capsule->nlp_dims);
-    landing_acados_create_set_opts(capsule);
+    landing2_acados_create_set_opts(capsule);
 
     // 4) create and set nlp_out
     // 4.1) nlp_out
     capsule->nlp_out = ocp_nlp_out_create(capsule->nlp_config, capsule->nlp_dims);
     // 4.2) sens_out
     capsule->sens_out = ocp_nlp_out_create(capsule->nlp_config, capsule->nlp_dims);
-    landing_acados_set_nlp_out(capsule);
+    landing2_acados_set_nlp_out(capsule);
 
     // 5) create nlp_in
     capsule->nlp_in = ocp_nlp_in_create(capsule->nlp_config, capsule->nlp_dims);
 
     // 6) setup functions, nlp_in and default parameters
-    landing_acados_create_setup_functions(capsule);
-    landing_acados_setup_nlp_in(capsule, N, new_time_steps);
-    landing_acados_create_set_default_parameters(capsule);
+    landing2_acados_create_setup_functions(capsule);
+    landing2_acados_setup_nlp_in(capsule, N, new_time_steps);
+    landing2_acados_create_set_default_parameters(capsule);
 
     // 7) create solver
     capsule->nlp_solver = ocp_nlp_solver_create(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_opts, capsule->nlp_in);
 
 
     // 8) do precomputations
-    int status = landing_acados_create_precompute(capsule);
+    int status = landing2_acados_create_precompute(capsule);
 
     return status;
 }
@@ -984,14 +991,14 @@ int landing_acados_create_with_discretization(landing_solver_capsule* capsule, i
 /**
  * This function is for updating an already initialized solver with a different number of qp_cond_N. It is useful for code reuse after code export.
  */
-int landing_acados_update_qp_solver_cond_N(landing_solver_capsule* capsule, int qp_solver_cond_N)
+int landing2_acados_update_qp_solver_cond_N(landing2_solver_capsule* capsule, int qp_solver_cond_N)
 {
     printf("\nacados_update_qp_solver_cond_N() not implemented, since no partial condensing solver is used!\n\n");
     exit(1);
 }
 
 
-int landing_acados_reset(landing_solver_capsule* capsule, int reset_qp_solver_mem)
+int landing2_acados_reset(landing2_solver_capsule* capsule, int reset_qp_solver_mem)
 {
 
     // set initialization to all zeros
@@ -1026,11 +1033,11 @@ int landing_acados_reset(landing_solver_capsule* capsule, int reset_qp_solver_me
 
 
 
-int landing_acados_update_params(landing_solver_capsule* capsule, int stage, double *p, int np)
+int landing2_acados_update_params(landing2_solver_capsule* capsule, int stage, double *p, int np)
 {
     int solver_status = 0;
 
-    int casadi_np = 0;
+    int casadi_np = 36;
     if (casadi_np != np) {
         printf("acados_update_params: trying to set %i parameters for external functions."
             " External function has %i parameters. Exiting.\n", np, casadi_np);
@@ -1042,7 +1049,7 @@ int landing_acados_update_params(landing_solver_capsule* capsule, int stage, dou
 }
 
 
-int landing_acados_update_params_sparse(landing_solver_capsule * capsule, int stage, int *idx, double *p, int n_update)
+int landing2_acados_update_params_sparse(landing2_solver_capsule * capsule, int stage, int *idx, double *p, int n_update)
 {
     ocp_nlp_in_set_params_sparse(capsule->nlp_config, capsule->nlp_dims, capsule->nlp_in, stage, idx, p, n_update);
 
@@ -1050,17 +1057,17 @@ int landing_acados_update_params_sparse(landing_solver_capsule * capsule, int st
 }
 
 
-int landing_acados_set_p_global_and_precompute_dependencies(landing_solver_capsule* capsule, double* data, int data_len)
+int landing2_acados_set_p_global_and_precompute_dependencies(landing2_solver_capsule* capsule, double* data, int data_len)
 {
 
-    // printf("No global_data, landing_acados_set_p_global_and_precompute_dependencies does nothing.\n");
+    // printf("No global_data, landing2_acados_set_p_global_and_precompute_dependencies does nothing.\n");
     return 0;
 }
 
 
 
 
-int landing_acados_solve(landing_solver_capsule* capsule)
+int landing2_acados_solve(landing2_solver_capsule* capsule)
 {
     // solve NLP
     int solver_status = ocp_nlp_solve(capsule->nlp_solver, capsule->nlp_in, capsule->nlp_out);
@@ -1070,7 +1077,7 @@ int landing_acados_solve(landing_solver_capsule* capsule)
 
 
 
-int landing_acados_setup_qp_matrices_and_factorize(landing_solver_capsule* capsule)
+int landing2_acados_setup_qp_matrices_and_factorize(landing2_solver_capsule* capsule)
 {
     int solver_status = ocp_nlp_setup_qp_matrices_and_factorize(capsule->nlp_solver, capsule->nlp_in, capsule->nlp_out);
 
@@ -1082,7 +1089,7 @@ int landing_acados_setup_qp_matrices_and_factorize(landing_solver_capsule* capsu
 
 
 
-int landing_acados_free(landing_solver_capsule* capsule)
+int landing2_acados_free(landing2_solver_capsule* capsule)
 {
     // before destroying, keep some info
     const int N = capsule->nlp_solver_plan->N;
@@ -1125,7 +1132,7 @@ int landing_acados_free(landing_solver_capsule* capsule)
 }
 
 
-void landing_acados_print_stats(landing_solver_capsule* capsule)
+void landing2_acados_print_stats(landing2_solver_capsule* capsule)
 {
     int nlp_iter, stat_m, stat_n, tmp_int;
     ocp_nlp_get(capsule->nlp_solver, "nlp_iter", &nlp_iter);
@@ -1161,7 +1168,7 @@ void landing_acados_print_stats(landing_solver_capsule* capsule)
     }
 }
 
-int landing_acados_custom_update(landing_solver_capsule* capsule, double* data, int data_len)
+int landing2_acados_custom_update(landing2_solver_capsule* capsule, double* data, int data_len)
 {
     (void)capsule;
     (void)data;
@@ -1174,11 +1181,11 @@ int landing_acados_custom_update(landing_solver_capsule* capsule, double* data, 
 
 
 
-ocp_nlp_in *landing_acados_get_nlp_in(landing_solver_capsule* capsule) { return capsule->nlp_in; }
-ocp_nlp_out *landing_acados_get_nlp_out(landing_solver_capsule* capsule) { return capsule->nlp_out; }
-ocp_nlp_out *landing_acados_get_sens_out(landing_solver_capsule* capsule) { return capsule->sens_out; }
-ocp_nlp_solver *landing_acados_get_nlp_solver(landing_solver_capsule* capsule) { return capsule->nlp_solver; }
-ocp_nlp_config *landing_acados_get_nlp_config(landing_solver_capsule* capsule) { return capsule->nlp_config; }
-void *landing_acados_get_nlp_opts(landing_solver_capsule* capsule) { return capsule->nlp_opts; }
-ocp_nlp_dims *landing_acados_get_nlp_dims(landing_solver_capsule* capsule) { return capsule->nlp_dims; }
-ocp_nlp_plan_t *landing_acados_get_nlp_plan(landing_solver_capsule* capsule) { return capsule->nlp_solver_plan; }
+ocp_nlp_in *landing2_acados_get_nlp_in(landing2_solver_capsule* capsule) { return capsule->nlp_in; }
+ocp_nlp_out *landing2_acados_get_nlp_out(landing2_solver_capsule* capsule) { return capsule->nlp_out; }
+ocp_nlp_out *landing2_acados_get_sens_out(landing2_solver_capsule* capsule) { return capsule->sens_out; }
+ocp_nlp_solver *landing2_acados_get_nlp_solver(landing2_solver_capsule* capsule) { return capsule->nlp_solver; }
+ocp_nlp_config *landing2_acados_get_nlp_config(landing2_solver_capsule* capsule) { return capsule->nlp_config; }
+void *landing2_acados_get_nlp_opts(landing2_solver_capsule* capsule) { return capsule->nlp_opts; }
+ocp_nlp_dims *landing2_acados_get_nlp_dims(landing2_solver_capsule* capsule) { return capsule->nlp_dims; }
+ocp_nlp_plan_t *landing2_acados_get_nlp_plan(landing2_solver_capsule* capsule) { return capsule->nlp_solver_plan; }
