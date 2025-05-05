@@ -6,7 +6,6 @@ import math
 import torch
 import torch.nn as nn
 import collections
-import zarr
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
@@ -20,15 +19,13 @@ mp.set_sharing_strategy('file_system')
 import gym
 from gym import spaces
 import pygame
-import pymunk
-import pymunk.pygame_util
-from pymunk.space_debug_draw_options import SpaceDebugColor
-from pymunk.vec2d import Vec2d
+
 import shapely.geometry as sg
 import cv2
 import skimage.transform as st
-from skvideo.io import vwrite
 import os
+
+from landing_env import LandingEnv
 
 
 
@@ -96,6 +93,20 @@ def get_data_stats(data: np.ndarray) -> dict:
 def normalize_data(data: np.ndarray, stats: dict) -> np.ndarray:
     n = (data - stats['min']) / (stats['max'] - stats['min'])
     return n * 2 - 1
+
+def unnormalize_data(ndata: np.ndarray, stats: dict) -> np.ndarray:
+    """
+    Invert normalize_data:
+      ndata ranges in [-1, 1]
+      stats is a dict with 'min' and 'max' arrays from get_data_stats
+
+    Returns data in the original scale.
+    """
+    # first map from [-1,1] to [0,1]
+    data01 = (ndata + 1.0) / 2.0
+    # then map [0,1] to [min, max]
+    return data01 * (stats['max'] - stats['min']) + stats['min']
+
 
 class LandingDataset(Dataset):
     """
@@ -179,9 +190,9 @@ class LandingDataset(Dataset):
 
 # parameters
 dataset_path = 'landing_param_dataset.npz'
-pred_horizon = 16
+pred_horizon = 4
 obs_horizon = 2
-action_horizon = 8
+action_horizon = 4
 #|o|o|                             observations: 2
 #| |a|a|a|a|a|a|a|a|               actions executed: 8
 #|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
@@ -521,211 +532,238 @@ noise_scheduler = DDPMScheduler(
 )
 
 # device transfer
-device_name = 'mps'
+device_name = 'cuda'
 device = torch.device(device_name)
 _ = noise_pred_net.to(device)
 #%%
 #@markdown ### **Training**
 #@markdown
 #@markdown Takes about an hour. If you don't want to wait, skip to the next cell
-#@markdown to load pre-trained weights
+#@ma
+TRAIN = False
+if TRAIN:
+    num_epochs = 100
 
-num_epochs = 100
+    # Exponential Moving Average
+    # accelerates training and improves stability
+    # holds a copy of the model weights
+    ema = EMAModel(
+        parameters=noise_pred_net.parameters(),
+        power=0.75)
 
-# Exponential Moving Average
-# accelerates training and improves stability
-# holds a copy of the model weights
-ema = EMAModel(
-    parameters=noise_pred_net.parameters(),
-    power=0.75)
+    # Standard ADAM optimizer
+    # Note that EMA parametesr are not optimized
+    optimizer = torch.optim.AdamW(
+        params=noise_pred_net.parameters(),
+        lr=1e-4, weight_decay=1e-6)
 
-# Standard ADAM optimizer
-# Note that EMA parametesr are not optimized
-optimizer = torch.optim.AdamW(
-    params=noise_pred_net.parameters(),
-    lr=1e-4, weight_decay=1e-6)
+    # Cosine LR schedule with linear warmup
+    lr_scheduler = get_scheduler(
+        name='cosine',
+        optimizer=optimizer,
+        num_warmup_steps=500,
+        num_training_steps=len(dataloader) * num_epochs
+    )
 
-# Cosine LR schedule with linear warmup
-lr_scheduler = get_scheduler(
-    name='cosine',
-    optimizer=optimizer,
-    num_warmup_steps=500,
-    num_training_steps=len(dataloader) * num_epochs
-)
+    with tqdm(range(num_epochs), desc='Epoch') as tglobal:
+        # epoch loop
+        for epoch_idx in tglobal:
+            epoch_loss = list()
+            # batch loop
+            with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
+                for nbatch in tepoch:
+                    # data normalized in dataset
+                    # device transfer
+                    nobs = nbatch['obs'].to(device)
+                    naction = nbatch['action'].to(device)
+                    B = nobs.shape[0]
 
-with tqdm(range(num_epochs), desc='Epoch') as tglobal:
-    # epoch loop
-    for epoch_idx in tglobal:
-        epoch_loss = list()
-        # batch loop
-        with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
-            for nbatch in tepoch:
-                # data normalized in dataset
-                # device transfer
-                nobs = nbatch['obs'].to(device)
-                naction = nbatch['action'].to(device)
-                B = nobs.shape[0]
+                    # observation as FiLM conditioning
+                    # (B, obs_horizon, obs_dim)
+                    obs_cond = nobs[:,:obs_horizon,:]
+                    # (B, obs_horizon * obs_dim)
+                    obs_cond = obs_cond.flatten(start_dim=1)
 
-                # observation as FiLM conditioning
-                # (B, obs_horizon, obs_dim)
-                obs_cond = nobs[:,:obs_horizon,:]
-                # (B, obs_horizon * obs_dim)
-                obs_cond = obs_cond.flatten(start_dim=1)
+                    # sample noise to add to actions
+                    noise = torch.randn(naction.shape, device=device)
 
-                # sample noise to add to actions
-                noise = torch.randn(naction.shape, device=device)
+                    # sample a diffusion iteration for each data point
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps,
+                        (B,), device=device
+                    ).long()
 
-                # sample a diffusion iteration for each data point
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps,
-                    (B,), device=device
-                ).long()
+                    # add noise to the clean images according to the noise magnitude at each diffusion iteration
+                    # (this is the forward diffusion process)
+                    noisy_actions = noise_scheduler.add_noise(
+                        naction, noise, timesteps)
 
-                # add noise to the clean images according to the noise magnitude at each diffusion iteration
-                # (this is the forward diffusion process)
-                noisy_actions = noise_scheduler.add_noise(
-                    naction, noise, timesteps)
+                    # predict the noise residual
+                    noise_pred = noise_pred_net(
+                        noisy_actions, timesteps, global_cond=obs_cond)
 
-                # predict the noise residual
-                noise_pred = noise_pred_net(
-                    noisy_actions, timesteps, global_cond=obs_cond)
+                    # L2 loss
+                    loss = nn.functional.mse_loss(noise_pred, noise)
 
-                # L2 loss
-                loss = nn.functional.mse_loss(noise_pred, noise)
+                    # optimize
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    # step lr scheduler every batch
+                    # this is different from standard pytorch behavior
+                    lr_scheduler.step()
 
-                # optimize
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                # step lr scheduler every batch
-                # this is different from standard pytorch behavior
-                lr_scheduler.step()
+                    # update Exponential Moving Average of the model weights
+                    ema.step(noise_pred_net.parameters())
 
-                # update Exponential Moving Average of the model weights
-                ema.step(noise_pred_net.parameters())
+                    # logging
+                    loss_cpu = loss.item()
+                    epoch_loss.append(loss_cpu)
+                    tepoch.set_postfix(loss=loss_cpu)
+            tglobal.set_postfix(loss=np.mean(epoch_loss))
 
-                # logging
-                loss_cpu = loss.item()
-                epoch_loss.append(loss_cpu)
-                tepoch.set_postfix(loss=loss_cpu)
-        tglobal.set_postfix(loss=np.mean(epoch_loss))
-
-# Weights of the EMA model
-# is used for inference
-ema_noise_pred_net = noise_pred_net
-ema.copy_to(ema_noise_pred_net.parameters())
+    # Weights of the EMA model
+    # is used for inference
+    ema_noise_pred_net = noise_pred_net
+    ema.copy_to(ema_noise_pred_net.parameters())
 
 
+    save_path = "saved_models"
+    os.makedirs(save_path, exist_ok=True)
 
-#%%
-#@markdown ### **Loading Pretrained Checkpoint**
-#@markdown Set `load_pretrained = True` to load pretrained weights.
+    # Save EMA-updated model (used for inference)
+    ema.copy_to(noise_pred_net.parameters())  # ensure ema weights are copied
+    torch.save(noise_pred_net.state_dict(), os.path.join(save_path, "ema_noise_pred_net.pth"))
 
-  #@markdown ### **Inference**
+    # Optional: Save optimizer and scheduler too (for checkpointing/resuming)
+    torch.save({
+        'model_state_dict': noise_pred_net.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+        'epoch': num_epochs,
+    }, os.path.join(save_path, "checkpoint.pth"))
 
-# limit enviornment interaction to 200 steps before termination
-# max_steps = 200
-# env = PushTEnv()
-# # use a seed >200 to avoid initial states seen in the training dataset
-# env.seed(100000)
 
-# # get first observation
-# obs, info = env.reset()
 
-# # keep a queue of last 2 steps of observations
-# obs_deque = collections.deque(
-#     [obs] * obs_horizon, maxlen=obs_horizon)
-# # save visualization and rewards
-# imgs = [env.render(mode='rgb_array')]
-# rewards = list()
-# done = False
-# step_idx = 0
+#%% Inference / Evaluation when TRAIN is False
+#%% Inference / Evaluation when TRAIN is False
+import os
+import numpy as np
+import torch
+from collections import deque
+import matplotlib.pyplot as plt
 
-# if __name__=="__main__":
 
-#     with tqdm(total=max_steps, desc="Eval PushTStateEnv") as pbar:
-#         while not done:
-#             B = 1
-#             # stack the last obs_horizon (2) number of observations
-#             obs_seq = np.stack(obs_deque)
-#             # normalize observation
-#             nobs = normalize_data(obs_seq, stats=stats['obs'])
-#             # device transfer
-#             nobs = torch.from_numpy(nobs).to(device, dtype=torch.float32)
+# Load pretrained EMA weights
+load_pretrained = True
+if load_pretrained:
+    ckpt_path = "saved_models/ema_noise_pred_net.pth"
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    state = torch.load(ckpt_path, map_location=device)
+    ema_noise_pred_net = noise_pred_net
+    ema_noise_pred_net.load_state_dict(state)
+    # wrap in EMAModel to ensure EMA params are active
+    ema = EMAModel(parameters=ema_noise_pred_net.parameters(), power=0.75)
+    ema.copy_to(ema_noise_pred_net.parameters())
+    noise_pred_net = ema_noise_pred_net
+    noise_pred_net.eval()
+    print("Pretrained weights loaded.")
+else:
+    print("Skipped pretrained weight loading.")
 
-#             # infer action
-#             with torch.no_grad():
-#                 # reshape observation to (B,obs_horizon*obs_dim)
-#                 obs_cond = nobs.unsqueeze(0).flatten(start_dim=1)
 
-#                 # initialize action from Guassian noise
-#                 noisy_action = torch.randn(
-#                     (B, pred_horizon, action_dim), device=device)
-#                 naction = noisy_action
 
-#                 # init scheduler
-#                 noise_scheduler.set_timesteps(num_diffusion_iters)
+#%% Inference / Evaluation
+import numpy as np
+import torch
+from collections import deque
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+# assume all imports and definitions: LandingEnv, ema_noise_pred_net,
+# noise_scheduler, normalize_data, unnormalize_data, stats,
+# pred_horizon, obs_horizon, action_horizon, action_dim,
+# num_diffusion_iters, device
 
-#                 for k in noise_scheduler.timesteps:
-#                     # predict noise
-#                     noise_pred = ema_noise_pred_net(
-#                         sample=naction,
-#                         timestep=k,
-#                         global_cond=obs_cond
-#                     )
+max_steps = 40
+env       = LandingEnv()
+env.dt = 0.5
+obs, info = env.reset(), {}
 
-#                     # inverse diffusion step (remove noise)
-#                     naction = noise_scheduler.step(
-#                         model_output=noise_pred,
-#                         timestep=k,
-#                         sample=naction
-#                     ).prev_sample
+obs_deque = deque([obs] * obs_horizon, maxlen=obs_horizon)
+traj, rewards = [obs.copy()], []
+step_idx, done = 0, False
 
-#             # unnormalize action
-#             naction = naction.detach().to('cpu').numpy()
-#             # (B, pred_horizon, action_dim)
-#             naction = naction[0]
-#             action_pred = unnormalize_data(naction, stats=stats['action'])
+noise_scheduler.set_timesteps(num_diffusion_iters)
+ema_noise_pred_net.eval()
 
-#             # only take action_horizon number of actions
-#             start = obs_horizon - 1
-#             end = start + action_horizon
-#             action = action_pred[start:end,:]
-#             # (action_horizon, action_dim)
+if __name__ == "__main__":
+    with torch.no_grad():  # disable grads for inference
+        with tqdm(total=max_steps, desc="Eval LandingEnv") as pbar:
+            while not done and step_idx < max_steps:
+                # 1) Build conditioning
+                obs_seq = np.stack(obs_deque)                            
+                nobs    = normalize_data(obs_seq, stats['obs'])           
+                tensor_obs = torch.from_numpy(nobs).float().to(device)    
+                obs_cond   = tensor_obs.unsqueeze(0).flatten(start_dim=1)  
 
-#             # execute action_horizon number of steps
-#             # without replanning
-#             for i in range(len(action)):
-#                 # stepping env
-#                 obs, reward, done, _, info = env.step(action[i])
-#                 # save observations
-#                 obs_deque.append(obs)
-#                 # and reward/vis
-#                 rewards.append(reward)
-#                 imgs.append(env.render(mode='rgb_array'))
+                # 2) Initialize noise
+                naction = torch.randn((1, pred_horizon, action_dim),
+                                      device=device, dtype=torch.float32)
 
-#                 # update progress bar
-#                 step_idx += 1
-#                 pbar.update(1)
-#                 pbar.set_postfix(reward=reward)
-#                 if step_idx > max_steps:
-#                     done = True
-#                 if done:
-#                     break
+                # 3) Reverse diffusion
+                for k in noise_scheduler.timesteps:
+                    noise_pred = ema_noise_pred_net(
+                        sample     = naction,
+                        timestep   = k,
+                        global_cond= obs_cond
+                    )
+                    naction = noise_scheduler.step(
+                        model_output=noise_pred,
+                        timestep=k,
+                        sample=naction
+                    ).prev_sample
 
-#     # print out the maximum target coverage
-#     print('Score: ', max(rewards))
+                # 4) Unnormalize & slice
+                na_np      = naction.squeeze(0).detach().cpu().numpy()   
+                all_actions= unnormalize_data(na_np, stats['action'])  
+                start      = obs_horizon - 1
+                actions    = all_actions[start : start + action_horizon]
+                print(actions)
+                # 5) Execute actions
+                for u in actions:
+                    obs, reward, done, _ = env.step(u)
+                    obs_deque.append(obs)
+                    traj.append(obs.copy())
+                    rewards.append(reward)
+                    step_idx += 1
+                    pbar.update(1)
+                    pbar.set_postfix(reward=reward)
+                    if done or step_idx >= max_steps:
+                        break
 
-#     #vwrite('vis.mp4', imgs)
-#     video_array = np.stack(imgs, axis=0).astype(np.uint8)
+    # 6) Plot results
+    print("Total reward:", sum(rewards))
+    traj = np.array(traj)
+    t    = np.arange(len(traj)) * env.dt
 
-#     # write with H.264 libx264, 30 FPS, yuv420p pixel format for widest compatibility
-#     vwrite(
-#         "vis.mp4",
-#         video_array,
-#         outputdict={
-#             '-r': '30',                # fps
-#             '-vcodec': 'libx264',      # encoder
-#             '-pix_fmt': 'yuv420p'      # pixel format
-#         }
-#     )
+    plt.figure(figsize=(5,4))
+    plt.plot(traj[:,0], traj[:,1], '-o')
+    plt.xlabel('x [m]'); plt.ylabel('y [m]'); plt.title('Ground Track'); plt.grid(True)
+
+    plt.figure(figsize=(5,4))
+    plt.plot(t, traj[:,2], '-o')
+    plt.xlabel('time [s]'); plt.ylabel('h [m]'); plt.title('Altitude vs Time'); plt.grid(True)
+    
+    
+    fig = plt.figure(figsize=(8, 6))
+    ax  = fig.add_subplot(111, projection='3d')
+    ax.plot(traj[:,0], traj[:,1], traj[:,2], marker='o')
+
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_zlabel('h [m]')
+    ax.set_title('3D Landing Trajectory')
+    plt.tight_layout()
+    plt.show()
