@@ -20,9 +20,6 @@ import gym
 from gym import spaces
 import pygame
 
-import shapely.geometry as sg
-import cv2
-import skimage.transform as st
 import os
 
 from landing_env import LandingEnv
@@ -34,6 +31,7 @@ from landing_env import LandingEnv
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 
 def create_sample_indices(
         episode_ends: np.ndarray,
@@ -53,10 +51,13 @@ def create_sample_indices(
         for idx in range(min_start, max_start + 1):
             buf_start = max(idx, 0) + start_idx
             buf_end   = min(idx + sequence_length, ep_len) + start_idx
+
             start_off = buf_start - (idx + start_idx)
             end_off   = (idx + sequence_length + start_idx) - buf_end
+
             sample_start = start_off
             sample_end   = sequence_length - end_off
+
             indices.append([
                 buf_start, buf_end,
                 sample_start, sample_end
@@ -76,6 +77,7 @@ def sample_sequence(
         seg = arr[buffer_start_idx:buffer_end_idx]
         if sample_start_idx > 0 or sample_end_idx < sequence_length:
             padded = np.zeros((sequence_length, *arr.shape[1:]), dtype=arr.dtype)
+            # fill head/tail with edge values
             if sample_start_idx > 0:
                 padded[:sample_start_idx] = seg[0]
             if sample_end_idx < sequence_length:
@@ -91,32 +93,21 @@ def get_data_stats(data: np.ndarray) -> dict:
     return {'min': flat.min(axis=0), 'max': flat.max(axis=0)}
 
 def normalize_data(data: np.ndarray, stats: dict) -> np.ndarray:
-    n = (data - stats['min']) / (stats['max'] - stats['min'])
-    return n * 2 - 1
+    data01 = (data - stats['min']) / (stats['max'] - stats['min'])
+    return data01 * 2.0 - 1.0
 
-def unnormalize_data(ndata: np.ndarray, stats: dict) -> np.ndarray:
-    """
-    Invert normalize_data:
-      ndata ranges in [-1, 1]
-      stats is a dict with 'min' and 'max' arrays from get_data_stats
-
-    Returns data in the original scale.
-    """
-    # first map from [-1,1] to [0,1]
-    data01 = (ndata + 1.0) / 2.0
-    # then map [0,1] to [min, max]
-    return data01 * (stats['max'] - stats['min']) + stats['min']
-
+def unnormalize_data(data: np.ndarray, stats: dict) -> np.ndarray:
+    data = (data + 1.0) / 2.0
+    return data * (stats['max'] - stats['min']) + stats['min']
 
 class LandingDataset(Dataset):
     """
-    Dataset for .npz trajectories:
-      X: (E, T+1, 6) full state
-      U: (E, T,   3) controls (3D position)
+    Uses only X from a .npz:
+      X: (E, T+1, sdim)
 
-    Returns fixed-length segments:
-      'obs':    (obs_horizon,   6)
-      'action': (pred_horizon,  3)
+    Returns:
+      'obs':    (obs_horizon,   sdim)
+      'action': (action_horizon, sdim)
     """
     def __init__(
         self,
@@ -126,73 +117,68 @@ class LandingDataset(Dataset):
         action_horizon: int,
     ):
         data = np.load(dataset_path)
-        X = data['X']    # (E, T+1, 6)
-        U = data['U']    # (E, T,   3)
-        E, T1, sdim = X.shape
-        T = T1 - 1       # original control length
+        X = data['X']               # (E, T+1, sdim)
+        E, L, sdim = X.shape
 
-        # pad U to length T+1 by repeating last control
-        U_pad = np.concatenate([U, U[:,-1:,:]], axis=1)  # (E, T+1, 3)
+        # flatten
+        X_flat = X.reshape(E * L, sdim)
+        train_data = {'obs': X_flat, 'action': X_flat}
 
-        # flatten episodes
-        obs_flat = X.reshape(E*(T+1), sdim)       # (E*(T+1), 6)
-        act_flat = U_pad.reshape(E*(T+1), 3)      # (E*(T+1), 3)
+        # episode boundaries
+        episode_ends = np.arange(1, E+1) * L
 
-        train_data = {'obs': obs_flat, 'action': act_flat}
-        episode_ends = np.arange(1, E+1) * (T+1)
-
-        # sample indices
+        # build indices so each t yields obs+action in a window of length `pred_horizon`
         self.indices = create_sample_indices(
             episode_ends    = episode_ends,
             sequence_length = pred_horizon,
-            pad_before      = obs_horizon - 1,
+            pad_before      = obs_horizon  - 1,
             pad_after       = action_horizon - 1,
         )
 
-        # stats & normalize
-        self.stats = {}
-        self.norm_data = {}
-        for key, arr in train_data.items():
-            st = get_data_stats(arr)
-            self.stats[key] = st
-            self.norm_data[key] = normalize_data(arr, st)
+        # compute & store stats, normalize
+        self.stats = {k: get_data_stats(v) for k, v in train_data.items()}
+        self.norm_data = {
+            k: normalize_data(v, self.stats[k])
+            for k, v in train_data.items()
+        }
 
-        self.pred_h = pred_horizon
-        self.obs_h  = obs_horizon
+        self.pred_horizon   = pred_horizon
+        self.obs_horizon    = obs_horizon
+        self.action_horizon = action_horizon
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx: int):
         bs, be, ss, se = self.indices[idx]
-        seq = sample_sequence(
-            train_data      = self.norm_data,
-            sequence_length = self.pred_h,
+
+        seqs = sample_sequence(
+            train_data       = self.norm_data,
+            sequence_length  = self.pred_horizon,
             buffer_start_idx = bs,
             buffer_end_idx   = be,
             sample_start_idx = ss,
-            sample_end_idx   = se,
+            sample_end_idx   = se
         )
-        seq['obs'] = seq['obs'][:self.obs_h]
+        # seqs['obs'] and seqs['action'] are both shape (pred_horizon, sdim)
+
+        obs    = seqs['obs']   [: self.obs_horizon]                     # (obs_horizon,   sdim)
+        action = seqs['action'][self.obs_horizon : self.obs_horizon + self.action_horizon]
+                                                                          # (action_horizon, sdim)
+
         return {
-            'obs':    torch.from_numpy(seq['obs']).float(),
-            'action': torch.from_numpy(seq['action']).float(),
+            'obs':    torch.from_numpy(obs).float(),
+            'action': torch.from_numpy(action).float(),
         }
-
-# Example usage:
-# ds = LandingNPZDataset('landing_param_dataset.npz', pred_horizon=50, obs_horizon=10, action_horizon=50)
-# loader = torch.utils.data.DataLoader(ds, batch_size=8, shuffle=True)
-
-
 
 #%%
 #@markdown ### **Dataset Demo**
 
 # parameters
 dataset_path = 'landing_param_dataset.npz'
-pred_horizon = 4
+pred_horizon = 16
 obs_horizon = 2
-action_horizon = 4
+action_horizon = 8
 #|o|o|                             observations: 2
 #| |a|a|a|a|a|a|a|a|               actions executed: 8
 #|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p|p| actions predicted: 16
@@ -492,7 +478,7 @@ class ConditionalUnet1D(nn.Module):
 # observation and action dimensions corrsponding to
 # the output of PushTEnv
 obs_dim = 6
-action_dim = 3
+action_dim = 6
 
 # create network object
 noise_pred_net = ConditionalUnet1D(
@@ -646,7 +632,6 @@ if TRAIN:
 
 
 #%% Inference / Evaluation when TRAIN is False
-#%% Inference / Evaluation when TRAIN is False
 import os
 import numpy as np
 import torch
@@ -655,7 +640,7 @@ import matplotlib.pyplot as plt
 
 
 # Load pretrained EMA weights
-load_pretrained = True
+load_pretrained = not(TRAIN) 
 if load_pretrained:
     ckpt_path = "saved_models/ema_noise_pred_net.pth"
     if not os.path.isfile(ckpt_path):
@@ -686,13 +671,13 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 # pred_horizon, obs_horizon, action_horizon, action_dim,
 # num_diffusion_iters, device
 
-max_steps = 40
+max_steps = 100
 env       = LandingEnv()
 env.dt = 0.5
 obs, info = env.reset(), {}
 
 obs_deque = deque([obs] * obs_horizon, maxlen=obs_horizon)
-traj, rewards = [obs.copy()], []
+traj, rewards, actions_list = [obs.copy()], [], []
 step_idx, done = 0, False
 
 noise_scheduler.set_timesteps(num_diffusion_iters)
@@ -727,21 +712,27 @@ if __name__ == "__main__":
 
                 # 4) Unnormalize & slice
                 na_np      = naction.squeeze(0).detach().cpu().numpy()   
+                
                 all_actions= unnormalize_data(na_np, stats['action'])  
                 start      = obs_horizon - 1
                 actions    = all_actions[start : start + action_horizon]
-                print(actions)
+                actions_list.append(actions.copy())
+                print('all_actions', all_actions)
+                # print(actions)
                 # 5) Execute actions
                 for u in actions:
-                    obs, reward, done, _ = env.step(u)
+                    obs, reward, done, _ = env.step(u[0:3])
                     obs_deque.append(obs)
                     traj.append(obs.copy())
                     rewards.append(reward)
                     step_idx += 1
                     pbar.update(1)
                     pbar.set_postfix(reward=reward)
-                    if done or step_idx >= max_steps:
+                    if done or step_idx >= max_steps or obs[2] < 1.0:
                         break
+                if obs[2] < 1.0 and abs(obs[1]) < 1.0 and abs(obs[3]) < np.deg2rad(5):
+                    print("Landing successful!")
+                    break
 
     # 6) Plot results
     print("Total reward:", sum(rewards))
@@ -757,13 +748,31 @@ if __name__ == "__main__":
     plt.xlabel('time [s]'); plt.ylabel('h [m]'); plt.title('Altitude vs Time'); plt.grid(True)
     
     
+
+
     fig = plt.figure(figsize=(8, 6))
     ax  = fig.add_subplot(111, projection='3d')
-    ax.plot(traj[:,0], traj[:,1], traj[:,2], marker='o')
+    ax.plot(traj[:,0], traj[:,1], traj[:,2])
 
     ax.set_xlabel('x [m]')
     ax.set_ylabel('y [m]')
     ax.set_zlabel('h [m]')
     ax.set_title('3D Landing Trajectory')
+
+    # make all axes use the same scale
+    xr = traj[:,0].max() - traj[:,0].min()
+    yr = traj[:,1].max() - traj[:,1].min()
+    zr = traj[:,2].max() - traj[:,2].min()
+    max_range = max(xr, yr, zr) / 2.0
+
+    x_mid = (traj[:,0].max() + traj[:,0].min()) * 0.5
+    y_mid = (traj[:,1].max() + traj[:,1].min()) * 0.5
+    z_mid = (traj[:,2].max() + traj[:,2].min()) * 0.5
+
+    ax.set_xlim(x_mid - max_range, x_mid + max_range)
+    ax.set_ylim(y_mid - max_range, y_mid + max_range)
+    ax.set_zlim(z_mid - max_range, z_mid + max_range)
+
     plt.tight_layout()
     plt.show()
+

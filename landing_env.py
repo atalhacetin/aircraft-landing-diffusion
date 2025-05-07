@@ -1,4 +1,4 @@
-# landing_env.py
+#%% landing_env.py
 
 import numpy as np
 import gym
@@ -54,9 +54,9 @@ class LandingEnv(gym.Env):
         self.V_ref = 70.0
 
         # PD gains (tune as needed)
-        self.Kp_psi,   self.Kd_psi   = 1.5, 0.3    # heading → bank angle μ
-        self.Kp_h,     self.Kd_h     = 0.5, 0.2    # altitude → normal load factor n_z
-        self.Kp_v                = 2.0            # speed → longitudinal load factor n_x
+        self.Kp_psi,   self.Kd_psi   = 0.1, 0.5    # heading → bank angle μ
+        self.Kp_h,     self.Kd_h     = 0.1, 0.2    # altitude → normal load factor n_z
+        self.Kp_v                = 1.0            # speed → longitudinal load factor n_x
 
         # actuator limits
         self.nx_min, self.nx_max = -3.0,  5.0
@@ -71,7 +71,7 @@ class LandingEnv(gym.Env):
         """Reset to default or provided initial state."""
         if x0 is None:
             # default starting conditions
-            self.x = np.array([-500., 100., 300., 70., np.pi/4., -0.05])
+            self.x = np.array([-500., 100., 300., 70., 0., -0.05])
         else:
             self.x = x0.copy()
         self.x_prev = self.x.copy()
@@ -82,14 +82,6 @@ class LandingEnv(gym.Env):
         action: [x_ref, y_ref, h_ref]
         Returns: obs, reward, done, info
         """
-        if True:
-            alpha = 0.1
-            self.x[0:3] = action * alpha + self.x[0:3] *(1-alpha) 
-            reward = 1.0
-            obs = self._get_obs()
-            done = False
-            info = {'u': action}
-            return obs, reward, done, info
         x_ref, y_ref, h_ref = action
         x, y, h, V, psi, gamma = self.x
 
@@ -109,7 +101,7 @@ class LandingEnv(gym.Env):
         # vertical accel a_z = Kp_h*e_h + Kd_h*e_h_dot
         a_z = self.Kp_h * e_h + self.Kd_h * e_h_dot
         # map to load factor: a_z ≈ g*(n_z - sinγ)
-        n_z = np.sin(gamma) + a_z / 9.81
+        n_z = np.sin(gamma) + a_z / 9.81 + 1/np.cos(mu)
         n_z = np.clip(n_z, self.nz_min, self.nz_max)
 
         # 3) Speed control → longitudinal load factor n_x
@@ -138,3 +130,41 @@ class LandingEnv(gym.Env):
 
     def close(self):
         pass
+
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    # simulation parameters
+    sim_time = 10.0            # total time [s]
+    env = LandingEnv()
+    obs = env.reset()
+    dt = env.dt
+    n_steps = int(sim_time / dt)
+
+    # fixed reference target
+    action = np.array([500.0, 0.0, 50.0], dtype=np.float32)
+
+    # storage
+    traj = np.zeros((n_steps+1, 6))
+    traj[0] = env.x.copy()
+
+    # run loop
+    for i in range(1, n_steps+1):
+        obs, reward, done, info = env.step(action)
+        traj[i] = env.x.copy()
+        if done:
+            print(f"Target reached in {i*dt:.2f} s (step {i})")
+            break
+
+    env.close()
+
+    # plot 3D trajectory
+    fig = plt.figure(figsize=(8,6))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot(traj[:i+1,0], traj[:i+1,1], traj[:i+1,2], marker='.')
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_zlabel('h [m]')
+    ax.set_title('3D Landing Trajectory')
+    plt.tight_layout()
+    plt.show()
