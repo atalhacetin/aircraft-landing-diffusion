@@ -6,7 +6,6 @@ import math
 import torch
 import torch.nn as nn
 import collections
-import zarr
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
 from diffusers.optimization import get_scheduler
@@ -20,15 +19,10 @@ mp.set_sharing_strategy('file_system')
 import gym
 from gym import spaces
 import pygame
-import pymunk
-import pymunk.pygame_util
-from pymunk.space_debug_draw_options import SpaceDebugColor
-from pymunk.vec2d import Vec2d
-import shapely.geometry as sg
-import cv2
-import skimage.transform as st
-from skvideo.io import vwrite
+
 import os
+
+from landing_env import LandingEnv
 
 
 
@@ -37,6 +31,7 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 
 def create_sample_indices(
         episode_ends: np.ndarray,
@@ -56,10 +51,13 @@ def create_sample_indices(
         for idx in range(min_start, max_start + 1):
             buf_start = max(idx, 0) + start_idx
             buf_end   = min(idx + sequence_length, ep_len) + start_idx
+
             start_off = buf_start - (idx + start_idx)
             end_off   = (idx + sequence_length + start_idx) - buf_end
+
             sample_start = start_off
             sample_end   = sequence_length - end_off
+
             indices.append([
                 buf_start, buf_end,
                 sample_start, sample_end
@@ -79,6 +77,7 @@ def sample_sequence(
         seg = arr[buffer_start_idx:buffer_end_idx]
         if sample_start_idx > 0 or sample_end_idx < sequence_length:
             padded = np.zeros((sequence_length, *arr.shape[1:]), dtype=arr.dtype)
+            # fill head/tail with edge values
             if sample_start_idx > 0:
                 padded[:sample_start_idx] = seg[0]
             if sample_end_idx < sequence_length:
@@ -94,18 +93,21 @@ def get_data_stats(data: np.ndarray) -> dict:
     return {'min': flat.min(axis=0), 'max': flat.max(axis=0)}
 
 def normalize_data(data: np.ndarray, stats: dict) -> np.ndarray:
-    n = (data - stats['min']) / (stats['max'] - stats['min'])
-    return n * 2 - 1
+    data01 = (data - stats['min']) / (stats['max'] - stats['min'])
+    return data01 * 2.0 - 1.0
+
+def unnormalize_data(data: np.ndarray, stats: dict) -> np.ndarray:
+    data = (data + 1.0) / 2.0
+    return data * (stats['max'] - stats['min']) + stats['min']
 
 class LandingDataset(Dataset):
     """
-    Dataset for .npz trajectories:
-      X: (E, T+1, 6) full state
-      U: (E, T,   3) controls (3D position)
+    Uses only X from a .npz:
+      X: (E, T+1, sdim)
 
-    Returns fixed-length segments:
-      'obs':    (obs_horizon,   6)
-      'action': (pred_horizon,  3)
+    Returns:
+      'obs':    (obs_horizon,   sdim)
+      'action': (action_horizon, sdim)
     """
     def __init__(
         self,
@@ -115,64 +117,59 @@ class LandingDataset(Dataset):
         action_horizon: int,
     ):
         data = np.load(dataset_path)
-        X = data['X']    # (E, T+1, 6)
-        U = data['U']    # (E, T,   3)
-        E, T1, sdim = X.shape
-        T = T1 - 1       # original control length
+        X = data['X']               # (E, T+1, sdim)
+        E, L, sdim = X.shape
 
-        # pad U to length T+1 by repeating last control
-        U_pad = np.concatenate([U, U[:,-1:,:]], axis=1)  # (E, T+1, 3)
+        # flatten
+        X_flat = X.reshape(E * L, sdim)
+        train_data = {'obs': X_flat, 'action': X_flat}
 
-        # flatten episodes
-        obs_flat = X.reshape(E*(T+1), sdim)       # (E*(T+1), 6)
-        act_flat = U_pad.reshape(E*(T+1), 3)      # (E*(T+1), 3)
+        # episode boundaries
+        episode_ends = np.arange(1, E+1) * L
 
-        train_data = {'obs': obs_flat, 'action': act_flat}
-        episode_ends = np.arange(1, E+1) * (T+1)
-
-        # sample indices
+        # build indices so each t yields obs+action in a window of length `pred_horizon`
         self.indices = create_sample_indices(
             episode_ends    = episode_ends,
             sequence_length = pred_horizon,
-            pad_before      = obs_horizon - 1,
+            pad_before      = obs_horizon  - 1,
             pad_after       = action_horizon - 1,
         )
 
-        # stats & normalize
-        self.stats = {}
-        self.norm_data = {}
-        for key, arr in train_data.items():
-            st = get_data_stats(arr)
-            self.stats[key] = st
-            self.norm_data[key] = normalize_data(arr, st)
+        # compute & store stats, normalize
+        self.stats = {k: get_data_stats(v) for k, v in train_data.items()}
+        self.norm_data = {
+            k: normalize_data(v, self.stats[k])
+            for k, v in train_data.items()
+        }
 
-        self.pred_h = pred_horizon
-        self.obs_h  = obs_horizon
+        self.pred_horizon   = pred_horizon
+        self.obs_horizon    = obs_horizon
+        self.action_horizon = action_horizon
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx: int):
         bs, be, ss, se = self.indices[idx]
-        seq = sample_sequence(
-            train_data      = self.norm_data,
-            sequence_length = self.pred_h,
+
+        seqs = sample_sequence(
+            train_data       = self.norm_data,
+            sequence_length  = self.pred_horizon,
             buffer_start_idx = bs,
             buffer_end_idx   = be,
             sample_start_idx = ss,
-            sample_end_idx   = se,
+            sample_end_idx   = se
         )
-        seq['obs'] = seq['obs'][:self.obs_h]
+        # seqs['obs'] and seqs['action'] are both shape (pred_horizon, sdim)
+
+        obs    = seqs['obs']   [: self.obs_horizon]                     # (obs_horizon,   sdim)
+        action = seqs['action'][self.obs_horizon : self.obs_horizon + self.action_horizon]
+                                                                          # (action_horizon, sdim)
+
         return {
-            'obs':    torch.from_numpy(seq['obs']).float(),
-            'action': torch.from_numpy(seq['action']).float(),
+            'obs':    torch.from_numpy(obs).float(),
+            'action': torch.from_numpy(action).float(),
         }
-
-# Example usage:
-# ds = LandingNPZDataset('landing_param_dataset.npz', pred_horizon=50, obs_horizon=10, action_horizon=50)
-# loader = torch.utils.data.DataLoader(ds, batch_size=8, shuffle=True)
-
-
 
 #%%
 #@markdown ### **Dataset Demo**
@@ -481,7 +478,7 @@ class ConditionalUnet1D(nn.Module):
 # observation and action dimensions corrsponding to
 # the output of PushTEnv
 obs_dim = 6
-action_dim = 3
+action_dim = 6
 
 # create network object
 noise_pred_net = ConditionalUnet1D(
@@ -521,211 +518,261 @@ noise_scheduler = DDPMScheduler(
 )
 
 # device transfer
-device_name = 'mps'
+device_name = 'cuda'
 device = torch.device(device_name)
 _ = noise_pred_net.to(device)
 #%%
 #@markdown ### **Training**
 #@markdown
 #@markdown Takes about an hour. If you don't want to wait, skip to the next cell
-#@markdown to load pre-trained weights
+#@ma
+TRAIN = False
+if TRAIN:
+    num_epochs = 100
 
-num_epochs = 100
+    # Exponential Moving Average
+    # accelerates training and improves stability
+    # holds a copy of the model weights
+    ema = EMAModel(
+        parameters=noise_pred_net.parameters(),
+        power=0.75)
 
-# Exponential Moving Average
-# accelerates training and improves stability
-# holds a copy of the model weights
-ema = EMAModel(
-    parameters=noise_pred_net.parameters(),
-    power=0.75)
+    # Standard ADAM optimizer
+    # Note that EMA parametesr are not optimized
+    optimizer = torch.optim.AdamW(
+        params=noise_pred_net.parameters(),
+        lr=1e-4, weight_decay=1e-6)
 
-# Standard ADAM optimizer
-# Note that EMA parametesr are not optimized
-optimizer = torch.optim.AdamW(
-    params=noise_pred_net.parameters(),
-    lr=1e-4, weight_decay=1e-6)
+    # Cosine LR schedule with linear warmup
+    lr_scheduler = get_scheduler(
+        name='cosine',
+        optimizer=optimizer,
+        num_warmup_steps=500,
+        num_training_steps=len(dataloader) * num_epochs
+    )
 
-# Cosine LR schedule with linear warmup
-lr_scheduler = get_scheduler(
-    name='cosine',
-    optimizer=optimizer,
-    num_warmup_steps=500,
-    num_training_steps=len(dataloader) * num_epochs
-)
+    with tqdm(range(num_epochs), desc='Epoch') as tglobal:
+        # epoch loop
+        for epoch_idx in tglobal:
+            epoch_loss = list()
+            # batch loop
+            with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
+                for nbatch in tepoch:
+                    # data normalized in dataset
+                    # device transfer
+                    nobs = nbatch['obs'].to(device)
+                    naction = nbatch['action'].to(device)
+                    B = nobs.shape[0]
 
-with tqdm(range(num_epochs), desc='Epoch') as tglobal:
-    # epoch loop
-    for epoch_idx in tglobal:
-        epoch_loss = list()
-        # batch loop
-        with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
-            for nbatch in tepoch:
-                # data normalized in dataset
-                # device transfer
-                nobs = nbatch['obs'].to(device)
-                naction = nbatch['action'].to(device)
-                B = nobs.shape[0]
+                    # observation as FiLM conditioning
+                    # (B, obs_horizon, obs_dim)
+                    obs_cond = nobs[:,:obs_horizon,:]
+                    # (B, obs_horizon * obs_dim)
+                    obs_cond = obs_cond.flatten(start_dim=1)
 
-                # observation as FiLM conditioning
-                # (B, obs_horizon, obs_dim)
-                obs_cond = nobs[:,:obs_horizon,:]
-                # (B, obs_horizon * obs_dim)
-                obs_cond = obs_cond.flatten(start_dim=1)
+                    # sample noise to add to actions
+                    noise = torch.randn(naction.shape, device=device)
 
-                # sample noise to add to actions
-                noise = torch.randn(naction.shape, device=device)
+                    # sample a diffusion iteration for each data point
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps,
+                        (B,), device=device
+                    ).long()
 
-                # sample a diffusion iteration for each data point
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps,
-                    (B,), device=device
-                ).long()
+                    # add noise to the clean images according to the noise magnitude at each diffusion iteration
+                    # (this is the forward diffusion process)
+                    noisy_actions = noise_scheduler.add_noise(
+                        naction, noise, timesteps)
 
-                # add noise to the clean images according to the noise magnitude at each diffusion iteration
-                # (this is the forward diffusion process)
-                noisy_actions = noise_scheduler.add_noise(
-                    naction, noise, timesteps)
+                    # predict the noise residual
+                    noise_pred = noise_pred_net(
+                        noisy_actions, timesteps, global_cond=obs_cond)
 
-                # predict the noise residual
-                noise_pred = noise_pred_net(
-                    noisy_actions, timesteps, global_cond=obs_cond)
+                    # L2 loss
+                    loss = nn.functional.mse_loss(noise_pred, noise)
 
-                # L2 loss
-                loss = nn.functional.mse_loss(noise_pred, noise)
+                    # optimize
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    # step lr scheduler every batch
+                    # this is different from standard pytorch behavior
+                    lr_scheduler.step()
 
-                # optimize
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                # step lr scheduler every batch
-                # this is different from standard pytorch behavior
-                lr_scheduler.step()
+                    # update Exponential Moving Average of the model weights
+                    ema.step(noise_pred_net.parameters())
 
-                # update Exponential Moving Average of the model weights
-                ema.step(noise_pred_net.parameters())
+                    # logging
+                    loss_cpu = loss.item()
+                    epoch_loss.append(loss_cpu)
+                    tepoch.set_postfix(loss=loss_cpu)
+            tglobal.set_postfix(loss=np.mean(epoch_loss))
 
-                # logging
-                loss_cpu = loss.item()
-                epoch_loss.append(loss_cpu)
-                tepoch.set_postfix(loss=loss_cpu)
-        tglobal.set_postfix(loss=np.mean(epoch_loss))
-
-# Weights of the EMA model
-# is used for inference
-ema_noise_pred_net = noise_pred_net
-ema.copy_to(ema_noise_pred_net.parameters())
+    # Weights of the EMA model
+    # is used for inference
+    ema_noise_pred_net = noise_pred_net
+    ema.copy_to(ema_noise_pred_net.parameters())
 
 
+    save_path = "saved_models"
+    os.makedirs(save_path, exist_ok=True)
 
-#%%
-#@markdown ### **Loading Pretrained Checkpoint**
-#@markdown Set `load_pretrained = True` to load pretrained weights.
+    # Save EMA-updated model (used for inference)
+    ema.copy_to(noise_pred_net.parameters())  # ensure ema weights are copied
+    torch.save(noise_pred_net.state_dict(), os.path.join(save_path, "ema_noise_pred_net.pth"))
 
-  #@markdown ### **Inference**
+    # Optional: Save optimizer and scheduler too (for checkpointing/resuming)
+    torch.save({
+        'model_state_dict': noise_pred_net.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+        'epoch': num_epochs,
+    }, os.path.join(save_path, "checkpoint.pth"))
 
-# limit enviornment interaction to 200 steps before termination
-# max_steps = 200
-# env = PushTEnv()
-# # use a seed >200 to avoid initial states seen in the training dataset
-# env.seed(100000)
 
-# # get first observation
-# obs, info = env.reset()
 
-# # keep a queue of last 2 steps of observations
-# obs_deque = collections.deque(
-#     [obs] * obs_horizon, maxlen=obs_horizon)
-# # save visualization and rewards
-# imgs = [env.render(mode='rgb_array')]
-# rewards = list()
-# done = False
-# step_idx = 0
+#%% Inference / Evaluation when TRAIN is False
+import os
+import numpy as np
+import torch
+from collections import deque
+import matplotlib.pyplot as plt
 
-# if __name__=="__main__":
 
-#     with tqdm(total=max_steps, desc="Eval PushTStateEnv") as pbar:
-#         while not done:
-#             B = 1
-#             # stack the last obs_horizon (2) number of observations
-#             obs_seq = np.stack(obs_deque)
-#             # normalize observation
-#             nobs = normalize_data(obs_seq, stats=stats['obs'])
-#             # device transfer
-#             nobs = torch.from_numpy(nobs).to(device, dtype=torch.float32)
+# Load pretrained EMA weights
+load_pretrained = not(TRAIN) 
+if load_pretrained:
+    ckpt_path = "saved_models/ema_noise_pred_net.pth"
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    state = torch.load(ckpt_path, map_location=device)
+    ema_noise_pred_net = noise_pred_net
+    ema_noise_pred_net.load_state_dict(state)
+    # wrap in EMAModel to ensure EMA params are active
+    ema = EMAModel(parameters=ema_noise_pred_net.parameters(), power=0.75)
+    ema.copy_to(ema_noise_pred_net.parameters())
+    noise_pred_net = ema_noise_pred_net
+    noise_pred_net.eval()
+    print("Pretrained weights loaded.")
+else:
+    print("Skipped pretrained weight loading.")
 
-#             # infer action
-#             with torch.no_grad():
-#                 # reshape observation to (B,obs_horizon*obs_dim)
-#                 obs_cond = nobs.unsqueeze(0).flatten(start_dim=1)
 
-#                 # initialize action from Guassian noise
-#                 noisy_action = torch.randn(
-#                     (B, pred_horizon, action_dim), device=device)
-#                 naction = noisy_action
 
-#                 # init scheduler
-#                 noise_scheduler.set_timesteps(num_diffusion_iters)
+#%% Inference / Evaluation
+import numpy as np
+import torch
+from collections import deque
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+# assume all imports and definitions: LandingEnv, ema_noise_pred_net,
+# noise_scheduler, normalize_data, unnormalize_data, stats,
+# pred_horizon, obs_horizon, action_horizon, action_dim,
+# num_diffusion_iters, device
 
-#                 for k in noise_scheduler.timesteps:
-#                     # predict noise
-#                     noise_pred = ema_noise_pred_net(
-#                         sample=naction,
-#                         timestep=k,
-#                         global_cond=obs_cond
-#                     )
+max_steps = 100
+env       = LandingEnv()
+env.dt = 0.5
+obs, info = env.reset(), {}
 
-#                     # inverse diffusion step (remove noise)
-#                     naction = noise_scheduler.step(
-#                         model_output=noise_pred,
-#                         timestep=k,
-#                         sample=naction
-#                     ).prev_sample
+obs_deque = deque([obs] * obs_horizon, maxlen=obs_horizon)
+traj, rewards, actions_list = [obs.copy()], [], []
+step_idx, done = 0, False
 
-#             # unnormalize action
-#             naction = naction.detach().to('cpu').numpy()
-#             # (B, pred_horizon, action_dim)
-#             naction = naction[0]
-#             action_pred = unnormalize_data(naction, stats=stats['action'])
+noise_scheduler.set_timesteps(num_diffusion_iters)
+ema_noise_pred_net.eval()
 
-#             # only take action_horizon number of actions
-#             start = obs_horizon - 1
-#             end = start + action_horizon
-#             action = action_pred[start:end,:]
-#             # (action_horizon, action_dim)
+if __name__ == "__main__":
+    with torch.no_grad():  # disable grads for inference
+        with tqdm(total=max_steps, desc="Eval LandingEnv") as pbar:
+            while not done and step_idx < max_steps:
+                # 1) Build conditioning
+                obs_seq = np.stack(obs_deque)                            
+                nobs    = normalize_data(obs_seq, stats['obs'])           
+                tensor_obs = torch.from_numpy(nobs).float().to(device)    
+                obs_cond   = tensor_obs.unsqueeze(0).flatten(start_dim=1)  
 
-#             # execute action_horizon number of steps
-#             # without replanning
-#             for i in range(len(action)):
-#                 # stepping env
-#                 obs, reward, done, _, info = env.step(action[i])
-#                 # save observations
-#                 obs_deque.append(obs)
-#                 # and reward/vis
-#                 rewards.append(reward)
-#                 imgs.append(env.render(mode='rgb_array'))
+                # 2) Initialize noise
+                naction = torch.randn((1, pred_horizon, action_dim),
+                                      device=device, dtype=torch.float32)
 
-#                 # update progress bar
-#                 step_idx += 1
-#                 pbar.update(1)
-#                 pbar.set_postfix(reward=reward)
-#                 if step_idx > max_steps:
-#                     done = True
-#                 if done:
-#                     break
+                # 3) Reverse diffusion
+                for k in noise_scheduler.timesteps:
+                    noise_pred = ema_noise_pred_net(
+                        sample     = naction,
+                        timestep   = k,
+                        global_cond= obs_cond
+                    )
+                    naction = noise_scheduler.step(
+                        model_output=noise_pred,
+                        timestep=k,
+                        sample=naction
+                    ).prev_sample
 
-#     # print out the maximum target coverage
-#     print('Score: ', max(rewards))
+                # 4) Unnormalize & slice
+                na_np      = naction.squeeze(0).detach().cpu().numpy()   
+                
+                all_actions= unnormalize_data(na_np, stats['action'])  
+                start      = obs_horizon - 1
+                actions    = all_actions[start : start + action_horizon]
+                actions_list.append(actions.copy())
+                print('all_actions', all_actions)
+                # print(actions)
+                # 5) Execute actions
+                for u in actions:
+                    obs, reward, done, _ = env.step(u[0:3])
+                    obs_deque.append(obs)
+                    traj.append(obs.copy())
+                    rewards.append(reward)
+                    step_idx += 1
+                    pbar.update(1)
+                    pbar.set_postfix(reward=reward)
+                    if done or step_idx >= max_steps or obs[2] < 1.0:
+                        break
+                if obs[2] < 1.0 and abs(obs[1]) < 1.0 and abs(obs[3]) < np.deg2rad(5):
+                    print("Landing successful!")
+                    break
 
-#     #vwrite('vis.mp4', imgs)
-#     video_array = np.stack(imgs, axis=0).astype(np.uint8)
+    # 6) Plot results
+    print("Total reward:", sum(rewards))
+    traj = np.array(traj)
+    t    = np.arange(len(traj)) * env.dt
 
-#     # write with H.264 libx264, 30 FPS, yuv420p pixel format for widest compatibility
-#     vwrite(
-#         "vis.mp4",
-#         video_array,
-#         outputdict={
-#             '-r': '30',                # fps
-#             '-vcodec': 'libx264',      # encoder
-#             '-pix_fmt': 'yuv420p'      # pixel format
-#         }
-#     )
+    plt.figure(figsize=(5,4))
+    plt.plot(traj[:,0], traj[:,1], '-o')
+    plt.xlabel('x [m]'); plt.ylabel('y [m]'); plt.title('Ground Track'); plt.grid(True)
+
+    plt.figure(figsize=(5,4))
+    plt.plot(t, traj[:,2], '-o')
+    plt.xlabel('time [s]'); plt.ylabel('h [m]'); plt.title('Altitude vs Time'); plt.grid(True)
+    
+    
+
+
+    fig = plt.figure(figsize=(8, 6))
+    ax  = fig.add_subplot(111, projection='3d')
+    ax.plot(traj[:,0], traj[:,1], traj[:,2])
+
+    ax.set_xlabel('x [m]')
+    ax.set_ylabel('y [m]')
+    ax.set_zlabel('h [m]')
+    ax.set_title('3D Landing Trajectory')
+
+    # make all axes use the same scale
+    xr = traj[:,0].max() - traj[:,0].min()
+    yr = traj[:,1].max() - traj[:,1].min()
+    zr = traj[:,2].max() - traj[:,2].min()
+    max_range = max(xr, yr, zr) / 2.0
+
+    x_mid = (traj[:,0].max() + traj[:,0].min()) * 0.5
+    y_mid = (traj[:,1].max() + traj[:,1].min()) * 0.5
+    z_mid = (traj[:,2].max() + traj[:,2].min()) * 0.5
+
+    ax.set_xlim(x_mid - max_range, x_mid + max_range)
+    ax.set_ylim(y_mid - max_range, y_mid + max_range)
+    ax.set_zlim(z_mid - max_range, z_mid + max_range)
+
+    plt.tight_layout()
+    plt.show()
+
