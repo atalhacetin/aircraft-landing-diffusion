@@ -143,7 +143,7 @@ class LandingNMPC:
                 g.append(phi);  lbg.append(1.0);  ubg.append(cs.inf)
 
         # soft terminal target (optional)
-        J += cs.mtimes((Xk - x_target).T, (Xk - x_target))*10
+        # J += cs.mtimes((Xk - x_target).T, (Xk - x_target))*10
         mu_max = mu_max_of_h(Xk[2])              # depends on current altitude
         g.append(Xk[5] - mu_max)                 #  μ − μ_max(h) ≤ 0
         lbg.append(-cs.inf);  ubg.append(0.0)
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     u_lim = np.array([0.1,3.0,np.pi/4])
     nmpc = LandingNMPC(T,N,M,Qd,Rd,u_lim)
 
-    x0  = np.array([-200,-500,100,70, np.pi/4, -0.05])
+    x0  = np.array([-200,-500,200,70, np.pi/4, -0.05])
     xT  = np.array([1000,0,0,1,0,0])
     sol = nmpc.solve(x0,xT)
 
