@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
+#%%
 # ------------------------------------------------------------------
 # Fixed‑wing landing NMPC with ellipsoidal obstacle avoidance
 # Compatible with acados template versions ≤2023‑10 and ≥2024‑xx
 # ------------------------------------------------------------------
 import numpy as np
-import casadi as ca
+import casadi as cs
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 # ------------------------------------------------------------------
@@ -13,21 +13,24 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 def build_model() -> AcadosModel:
     m = AcadosModel();  m.name = "landing"
     nx, nu = 6, 3
-    x    = ca.MX.sym('x', nx)
-    u    = ca.MX.sym('u', nu)
-    xdot = ca.MX.sym('xdot', nx)
+    x    = cs.MX.sym('x', nx)
+    u    = cs.MX.sym('u', nu)
+    xdot = cs.MX.sym('xdot', nx)
+    p = cs.MX.sym("p", 3)          # p = [deltax, deltay, deltah]  (only deltax used)
+    m.p = p                        # store in model 
+
 
     g = 9.81
     V, psi, gamma = x[3], x[4], x[5]
     n_x, n_z, mu  = u[0], u[1], u[2]
 
-    f = ca.vertcat(
-        V*ca.cos(psi)*ca.cos(gamma),
-        V*ca.sin(psi)*ca.cos(gamma),
-        V*ca.sin(gamma),
-        g*(n_x - ca.sin(gamma)),
-        g*n_z/V * ca.sin(mu)/ca.cos(gamma),
-        g/V * (n_z*ca.cos(mu) - ca.cos(gamma))
+    f = cs.vertcat(
+        V*cs.cos(psi)*cs.cos(gamma),
+        V*cs.sin(psi)*cs.cos(gamma),
+        V*cs.sin(gamma),
+        g*(n_x - cs.sin(gamma)),
+        g*n_z/V * cs.sin(mu)/cs.cos(gamma),
+        g/V * (n_z*cs.cos(mu) - cs.cos(gamma))
     )
 
     m.sym_x, m.sym_u, m.sym_xdot = x, u, xdot
@@ -43,7 +46,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     nx, nu = 6, 3
 
     # ---------- horizon --------------------------------------------
-    Tf, N = 2.0, 10
+    Tf, N = 1.0, 10
     ocp.solver_options.tf = Tf
     if hasattr(ocp.dims, "N_horizon"):
         ocp.dims.N_horizon = N
@@ -56,7 +59,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     ocp.solver_options.qp_solver = "FULL_CONDENSING_HPIPM"  # supports one‑side
 
     # ---------- cost (linear LS) -----------------------------------
-    Q = np.diag([0., 0.1, 0.01, 0.01, 20., 10.])
+    Q = np.diag([0., 0.1, 0.01, 1.0, 20., 10.])
     R = np.diag([0.1, 0.1, 1])
     ny, ny_e = nx + nu, nx
 
@@ -88,14 +91,24 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     ocp.constraints.ubx_0   = np.zeros(nx)
 
     # ---------- ellipsoidal obstacles ------------------------------
+    ocp.dims.np = 3                # MUST match len(model.p)
+    ocp.parameter_values = np.zeros((3, 1))   # or simply  np.zeros(3)
+    
+    # ---------- moving ellipsoids ----------------------------------
+    p = model.p                    # ← fetch the parameter symbol here
+
     radii   = np.array([10., 10., 10.])
     centers = np.array([[400, 2.5, 0], [600,-3,0], [500,12,0],
                         [200, 6 , 0], [100,-3,0], [500,-3,0]])
-    phi = [((ocp.model.sym_x[0]-cx)/radii[0])**2 +
-           ((ocp.model.sym_x[1]-cy)/radii[1])**2 +
-           ((ocp.model.sym_x[2]-cz)/radii[2])**2 for cx,cy,cz in centers]
 
-    expr_h = ca.vertcat(*phi)
+    phi = []
+    for cx, cy, cz in centers:
+        cxi = cx + p[0]            # shift in +x direction
+        phi.append(((model.x[0]-cxi)/radii[0])**2 +
+                   ((model.x[1]-cy )/radii[1])**2 +
+                   ((model.x[2]-cz )/radii[2])**2)
+
+    expr_h = cs.vertcat(*phi)
     ocp.model.expr_h     = expr_h   # new name
     ocp.model.con_h_expr = expr_h   # legacy name
     n_h = expr_h.shape[0]
@@ -125,6 +138,8 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
 # ------------------------------------------------------------------
 def build_solver(ocp: AcadosOcp) -> AcadosOcpSolver:
     json = "landing_ocp.json"
+    ocp.solver_options.nlp_solver_max_iter = 400    # ← outer SQP iterations
+    ocp.solver_options.qp_solver_iter_max  = 100    # ← HPIPM Riccati sweeps
     AcadosOcpSolver.generate(ocp, json_file=json, verbose=False)
     return AcadosOcpSolver(ocp, json_file=json)
 
@@ -170,9 +185,10 @@ def main_mpc():
     sim_steps = int(sim_time / dt)
 
     # Initial and target states
-    x0 = np.array([-200., 100., 100., 70., 0., -0.05])
+    x0 = np.array([0., 100., 200., 70., 0., -0.05])
     xdes = np.array([1000., 0., 0., 50., 0., 0.])
     nx, nu = 6, 3
+    car_vel = 40 # [m/s] car velocity
 
     # Allocate logs
     X_log = np.zeros((sim_steps+1, nx))
@@ -181,6 +197,7 @@ def main_mpc():
     X_log[0] = x0.copy()
 
     # === MPC Loop ===
+    actual_steps = 0            # how many steps we finally run
     for sim_k in range(sim_steps):
         print(f"--- MPC Step {sim_k} ---")
 
@@ -192,6 +209,13 @@ def main_mpc():
         for k in range(N):
             solver.set(k, "y_ref", np.hstack((xdes, np.zeros(nu))))
         solver.set(N, "y_ref", xdes)
+        
+        for k in range(N):
+            t_stage = k * dt
+            shift   = car_vel * t_stage
+            solver.set(k, "p", np.array([shift, 0.0, 0.0]))
+        solver.set(N, "p", np.array([car_vel * Tf, 0.0, 0.0]))
+
 
         # Warm start
         for k in range(N):
@@ -217,6 +241,21 @@ def main_mpc():
         # Advance the state
         x0 = rk4(x0, u0, dt)
         X_log[sim_k+1] = x0
+        print(f"Step {sim_k}: x = {x0}, u = {u0}")
+        actual_steps = sim_k + 1         # update every iteration
+        # Check if the aircraft has landed or crashed
+        if x0[2] < 0 and False:
+            print("Aircraft has landed or crashed, stopping simulation.")
+            break
+
+    X_log = X_log[:actual_steps + 1]     # +1 because X_log has k and k+1
+    U_log = U_log[:actual_steps]
+    T_log = T_log[:actual_steps]
+
+    dt_real   = dt                       # same time step
+    sim_steps = actual_steps             # overwrite for later plotting
+    t_state   = np.arange(sim_steps + 1) * dt_real
+    t_control = np.arange(sim_steps)     * dt_real
 
     # === Save and Plot ===
     np.savez("mpc_landing_sim.npz", X=X_log, U=U_log, T=T_log)
@@ -266,6 +305,121 @@ def main_mpc():
     axu[-1].set_xlabel("time [s]")
     fig_u.suptitle("Control inputs applied by MPC", fontsize=14)
     fig_u.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+
+    import matplotlib.pyplot as plt
+    from matplotlib import animation
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3-D)
+    # ---------- figure -------------------------------------------------
+    fig_anim = plt.figure(figsize=(8, 6))
+    ax_anim  = fig_anim.add_subplot(111, projection='3d')
+    ax_anim.set_xlabel('x [m]')
+    ax_anim.set_ylabel('y [m]')
+    ax_anim.set_zlabel('h [m]')
+    ax_anim.set_title('MPC trajectory (animated)')
+
+
+    # --- obstacle geometry (mesh stays the same, only centre moves) ---
+    radii   = np.array([10., 10., 10.])
+    centers = np.array([[400, 2.5, 0],
+                        [600,-3 , 0],
+                        [500,12 , 0],
+                        [200, 6 , 0],
+                        [100,-3 , 0],
+                        [500,-3 , 0]])
+
+    u  = np.linspace(0, 2*np.pi, 24)
+    v  = np.linspace(0,     np.pi, 12)
+    uu, vv = np.meshgrid(u, v)
+
+
+
+        # --- include final obstacle positions in the range test -------------
+    shift_max = car_vel * (X_log.shape[0]-1) * dt        # last frame
+
+    all_x = np.hstack([X_log[:, 0],
+                    centers[:, 0] + shift_max, centers[:, 0]         ])
+    all_y = np.hstack([X_log[:, 1],
+                    centers[:, 1]                     ])
+    all_z = np.hstack([X_log[:, 2],
+                    centers[:, 2] + radii[2], centers[:, 2] - radii[2]])
+
+    max_range = np.array([all_x.ptp(), all_y.ptp(), all_z.ptp()]).max() / 2
+    mid_x     = (all_x.min() + all_x.max()) * 0.5
+    mid_y     = (all_y.min() + all_y.max()) * 0.5
+    mid_z     = (all_z.min() + all_z.max()) * 0.5
+
+    ax_anim.set_xlim(mid_x - max_range, mid_x + max_range)
+    ax_anim.set_ylim(mid_y - max_range, mid_y + max_range)
+    ax_anim.set_zlim(mid_z - max_range, mid_z + max_range)
+
+
+    # create an (empty) Poly3DCollection per ellipsoid,
+    # so we can update verts without deleting the artist
+    # ===================== build obstacle surfaces ====================
+    surf_handles = []
+    for cx, cy, cz in centers:           # t = 0  ⇒ shift = 0
+        xs = radii[0]*np.cos(uu)*np.sin(vv) + cx
+        ys = radii[1]*np.sin(uu)*np.sin(vv) + cy
+        zs = radii[2]*np.cos(vv)            + cz
+        h = ax_anim.plot_surface(xs, ys, zs, color='crimson',
+                                alpha=0.25, linewidth=0)
+        surf_handles.append(h)
+
+
+    # trajectory objects
+    traj_line, = ax_anim.plot([], [], [], lw=2, color='royalblue')
+    point,     = ax_anim.plot([], [], [], 'o', color='navy', markersize=6)
+
+    # equal-aspect ratio hack (unchanged) …
+
+
+    # ---------- animation callbacks -----------------------------------
+    def init():
+        traj_line.set_data([], [])
+        traj_line.set_3d_properties([])
+        point.set_data([], [])
+        point.set_3d_properties([])
+        return [traj_line, point, *surf_handles]
+
+    # ===================== animation callback =========================
+    def animate(k):
+        t = k * dt
+        shift = car_vel * t
+
+        # aircraft ------------------------------------------------------
+        traj_line.set_data(X_log[:k+1,0], X_log[:k+1,1])
+        traj_line.set_3d_properties(X_log[:k+1,2])
+        point.set_data([X_log[k,0]], [X_log[k,1]])
+        point.set_3d_properties([X_log[k,2]])
+
+        # obstacles -----------------------------------------------------
+        for i, (cx, cy, cz) in enumerate(centers):
+            # delete previous surface
+            surf_handles[i].remove()
+
+            # new shifted surface
+            xs = radii[0]*np.cos(uu)*np.sin(vv) + (cx + shift)
+            ys = radii[1]*np.sin(uu)*np.sin(vv) +  cy
+            zs = radii[2]*np.cos(vv)            +  cz
+            surf_handles[i] = ax_anim.plot_surface(
+                xs, ys, zs, color='crimson', alpha=0.25, linewidth=0)
+
+        return [traj_line, point, *surf_handles]
+
+
+    fps = int(1/dt)
+    ani = animation.FuncAnimation(fig_anim, animate,
+                                frames=X_log.shape[0],
+                                init_func=init, blit=False,
+                                interval=1000/fps)
+
+    # save or show as before …
+
+    ani.save("mpc_landing.mp4",
+         writer="ffmpeg",        # needs ffmpeg in your PATH
+         fps=fps, dpi=200,
+         bitrate=-1)            # -1 ⇒ let ffmpeg pick a sane bitrate
 
     plt.show()
 
@@ -373,3 +527,5 @@ def main_ocp():
 if __name__ == "__main__":
     main_mpc()
     #main_ocp()  # Uncomment to run the OCP directly
+
+# %%
