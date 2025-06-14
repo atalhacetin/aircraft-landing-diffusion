@@ -4,7 +4,7 @@ import casadi as cs
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 # ------------------------------------------------------------------
-# 1)  Aircraft model (from MPC code)
+# 1) Aircraft model (from MPC code)
 # ------------------------------------------------------------------
 def build_model() -> AcadosModel:
     m = AcadosModel();  m.name = "landing"
@@ -35,9 +35,9 @@ def build_model() -> AcadosModel:
     return m
 
 # ------------------------------------------------------------------
-# 2)  OCP description (from MPC code)
+# 2) OCP description (from MPC code)
 # ------------------------------------------------------------------
-def build_ocp(model: AcadosModel) -> AcadosOcp:
+def build_ocp(model: AcadosModel, global_centers: np.ndarray) -> AcadosOcp: # Modified to accept global_centers
     ocp = AcadosOcp();       ocp.model = model
     nx, nu = 6, 3
 
@@ -97,8 +97,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     # Use 6 obstacles as in the first script for consistency if desired
     # For simplicity, we'll keep the radii fixed and small for now
     global_radii   = np.array([10., 10., 10.])
-    global_centers = np.array([[400, 2.5, 0], [600,-3,0], [500,12,0],
-                               [200, 6 , 0], [100,-3,0], [500,-3,0]])
+    # global_centers is now passed as an argument
 
     phi = []
     for cx, cy, cz in global_centers:
@@ -130,7 +129,7 @@ def build_ocp(model: AcadosModel) -> AcadosOcp:
     return ocp
 
 # ------------------------------------------------------------------
-# 3)  Build solver (from MPC code)
+# 3) Build solver (from MPC code)
 # ------------------------------------------------------------------
 def build_solver(ocp: AcadosOcp) -> AcadosOcpSolver:
     json = "landing_ocp_mpc_dataset.json"
@@ -184,37 +183,73 @@ def rk4(x, u, dt):
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     np.random.seed(0)  # For reproducibility
-    # 1) Build the model, OCP, and solver
-    model  = build_model()
-    ocp    = build_ocp(model) # OCP now uses the 'p' parameter for obstacle shifting
-    solver = build_solver(ocp)
 
     nx, nu = 6, 3
-    N = ocp.dims.N_horizon if hasattr(ocp.dims, "N_horizon") else ocp.dims.N
-    Tf = ocp.solver_options.tf
-    dt = Tf / N
-    sim_time = 25.0 # Total simulation time for each trajectory
-    sim_steps_per_run = int(sim_time / dt) # Number of MPC steps per run
-
-    Nrun = 10 # Number of full trajectories to generate
+    Nrun = 200 # Number of full trajectories to generate
 
     # pre‐allocate lists
-    X_list, U_list, C_list, R_list, CarVel_list = [], [], [], [], [] # <--- Add CarVel_list here
+    X_list, U_list, C_list, R_list, CarVel_list = [], [], [], [], [] 
 
-
-    # Get the fixed obstacle parameters from the OCP build
+    # Define base radii (these are fixed for all runs)
     base_radii = np.array([10., 10., 10.])
-    base_centers = np.array([[400, 2.5, 0], [600,-3,0], [500,12,0],
-                             [200, 6 , 0], [100,-3,0], [500,-3,0]])
+
+    # Define a set of possible base center configurations
+    # You can add more configurations here
+    OBSTACLE_X_MIN = -500
+    OBSTACLE_X_MAX = 1000 # Extended slightly from max of 620 in original data
+    OBSTACLE_Y_MIN = -15 # Extended slightly from min of -8 in original data
+    OBSTACLE_Y_MAX = 15  # Extended slightly from max of 12 in original data
+    NUM_OBSTACLES_PER_RUN = 8 # Keeping the number of obstacles consistent with your examples
+
+    # Original obstacle_configurations are no longer needed if sampling dynamically
+    # obstacle_configurations = [
+    #         np.array([[400, 2.5, 0], [600,-3,0], [500,12,0],
+    #                   [200, 6 , 0], [100,-3,0], [500,-3,0]]),
+    #         np.array([[350, 5.0, 0], [550, -5, 0], [450, 10, 0],
+    #                   [150, 8 , 0], [ 50, -6, 0], [400, -8, 0]]),
+    #         np.array([[420, 0, 0], [620, 0, 0], [520, 0, 0],
+    #                   [220, 0, 0], [120, 0, 0], [520, 0, 0]])
+    #     ]
 
 
-    x_min_initial = np.array([-500, -200,    100,  50, -np.pi/4, -np.deg2rad(20)])
-    x_max_initial = np.array([ 100,  200, 500, 100,  np.pi/4,  np.deg2rad(20)])
-    
+    x_min_initial = np.array([-500, -500,    100,  50, -np.pi/4, -np.deg2rad(20)])
+    x_max_initial = np.array([ 100,  500, 500, 100,  np.pi/4,  np.deg2rad(20)])
+
     xdes = np.array([1000., 0., 0., 50., 0., 0.])
     car_vel_options = [0, 10, 20, 30, 40] # Different car velocities to vary scenarios
 
+    # Build the model once as it's independent of obstacle centers
+    model  = build_model()
+
+    # Loop through the runs, generating new obstacle configurations for each
     for i in range(Nrun):
+        # Initialize an empty list to store the obstacle positions for this run
+        current_obstacle_centers = []
+
+        # Generate x and y coordinates for each obstacle from a uniform distribution
+        for _ in range(NUM_OBSTACLES_PER_RUN):
+            # Sample x from [OBSTACLE_X_MIN, OBSTACLE_X_MAX]
+            obstacle_x = np.random.uniform(OBSTACLE_X_MIN, OBSTACLE_X_MAX)
+            # Sample y from [OBSTACLE_Y_MIN, OBSTACLE_Y_MAX]
+            obstacle_y = np.random.uniform(OBSTACLE_Y_MIN, OBSTACLE_Y_MAX)
+            # z is kept at 0 as per your original data
+            current_obstacle_centers.append([obstacle_x, obstacle_y, 0])
+
+        # Convert the list of obstacle centers to a NumPy array
+        current_base_centers = np.array(current_obstacle_centers)
+
+        print(f"\nRun {i+1}: Generated Obstacle Centers:")
+        print(current_base_centers)
+        # 1) Build the OCP and solver for the current obstacle configuration
+        ocp    = build_ocp(model, current_base_centers)
+        solver = build_solver(ocp)
+
+        N = ocp.dims.N_horizon if hasattr(ocp.dims, "N_horizon") else ocp.dims.N
+        Tf = ocp.solver_options.tf
+        dt = Tf / N
+        sim_time = 25.0 # Total simulation time for each trajectory
+        sim_steps_per_run = int(sim_time / dt) # Number of MPC steps per run
+
         # 1) random x0
         x0_initial = np.random.uniform(x_min_initial, x_max_initial)
         x0_current = x0_initial.copy()
@@ -229,7 +264,7 @@ if __name__ == "__main__":
 
         actual_sim_steps = 0
 
-        print(f"\n--- Starting Run {i+1} with car_vel={car_vel} m/s ---")
+        print(f"\n--- Starting Run {i+1} with car_vel={car_vel} m/s and base_centers={current_base_centers[0]} (first obstacle) ---")
 
         for sim_k in range(sim_steps_per_run):
             # Set current state as initial constraint
@@ -302,15 +337,15 @@ if __name__ == "__main__":
 
         # Check for successful landing conditions and no collision
         # The collision check needs to consider the dynamic obstacle positions
-        if abs(yf_final) <= 12.0 and h_final <= 0.5 and not(trajectory_collides(X_simulated_trajectory, base_centers, base_radii, current_p_for_collision_check)):
+        if abs(yf_final) <= 12.0 and h_final <= 0.5 and not(trajectory_collides(X_simulated_trajectory, current_base_centers, base_radii, current_p_for_collision_check)):
             print(f"Run {i+1}: SUCCESS! y_final = {yf_final:.2f} m, h_final = {h_final:.2f} m")
             X_list.append(X_simulated_trajectory)
             U_list.append(U_simulated_trajectory)
-            C_list.append(base_centers) 
+            C_list.append(current_base_centers) # Save the current base centers used
             R_list.append(base_radii)
-            CarVel_list.append(car_vel) # <--- Add this line to save car_vel for successful runs
+            CarVel_list.append(car_vel) 
         else:
-            print(f"Run {i+1}: FAILED (y_final={yf_final:.2f}, h_final={h_final:.2f}, collision={trajectory_collides(X_simulated_trajectory, base_centers, base_radii, current_p_for_collision_check)})")
+            print(f"Run {i+1}: FAILED (y_final={yf_final:.2f}, h_final={h_final:.2f}, collision={trajectory_collides(X_simulated_trajectory, current_base_centers, base_radii, current_p_for_collision_check)})")
 
 
     # 6) save full dataset
@@ -321,7 +356,7 @@ if __name__ == "__main__":
             U         = np.array(U_list, dtype=object),
             centers   = np.array(C_list, dtype=object),
             radii     = np.array(R_list, dtype=object),
-            car_velocities = np.array(CarVel_list) # <--- Make sure this line is present
+            car_velocities = np.array(CarVel_list)
         )
         print(f"Saved {len(X_list)} successful scenarios → landing_mpc_dataset.npz")
     else:
