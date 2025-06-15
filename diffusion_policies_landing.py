@@ -22,7 +22,7 @@ import pygame
 
 import os
 
-from landing_env import LandingEnv
+from landing_env_v2 import LandingEnv
 
 
 
@@ -213,6 +213,7 @@ class LandingDataset(Dataset):
         self.pred_horizon = pred_horizon
         self.obs_horizon = obs_horizon
         self.action_horizon = action_horizon
+        self.obs_dim = train_data['obs'].shape[-1]
         self.action_dim = train_data['action'].shape[-1]
         print("Dataset ready.")
 
@@ -562,9 +563,9 @@ class ConditionalUnet1D(nn.Module):
 #@markdown ### **Network Demo**
 
 # observation and action dimensions corrsponding to
-# the output of PushTEnv
-obs_dim = 6
-action_dim = 6
+# the output of LandingEnv
+obs_dim = dataset.obs_dim
+action_dim = dataset.action_dim
 
 # create network object
 noise_pred_net = ConditionalUnet1D(
@@ -612,19 +613,20 @@ _ = noise_pred_net.to(device)
 #@markdown
 #@markdown Takes about an hour. If you don't want to wait, skip to the next cell
 #@ma
-TRAIN = False
+import matplotlib.pyplot as plt
+TRAIN = True # Set to True to run training for demonstration
 if TRAIN:
     num_epochs = 100
 
+    # Initialize a list to store the mean loss for each epoch
+    training_losses = []
+
     # Exponential Moving Average
-    # accelerates training and improves stability
-    # holds a copy of the model weights
     ema = EMAModel(
         parameters=noise_pred_net.parameters(),
         power=0.75)
 
     # Standard ADAM optimizer
-    # Note that EMA parametesr are not optimized
     optimizer = torch.optim.AdamW(
         params=noise_pred_net.parameters(),
         lr=1e-4, weight_decay=1e-6)
@@ -640,7 +642,7 @@ if TRAIN:
     with tqdm(range(num_epochs), desc='Epoch') as tglobal:
         # epoch loop
         for epoch_idx in tglobal:
-            epoch_loss = list()
+            epoch_loss = [] # This will store batch losses for the current epoch
             # batch loop
             with tqdm(dataloader, desc='Batch', leave=False) as tepoch:
                 for nbatch in tepoch:
@@ -651,9 +653,7 @@ if TRAIN:
                     B = nobs.shape[0]
 
                     # observation as FiLM conditioning
-                    # (B, obs_horizon, obs_dim)
                     obs_cond = nobs[:,:obs_horizon,:]
-                    # (B, obs_horizon * obs_dim)
                     obs_cond = obs_cond.flatten(start_dim=1)
 
                     # sample noise to add to actions
@@ -665,8 +665,7 @@ if TRAIN:
                         (B,), device=device
                     ).long()
 
-                    # add noise to the clean images according to the noise magnitude at each diffusion iteration
-                    # (this is the forward diffusion process)
+                    # add noise to the clean images
                     noisy_actions = noise_scheduler.add_noise(
                         naction, noise, timesteps)
 
@@ -681,8 +680,6 @@ if TRAIN:
                     loss.backward()
                     optimizer.step()
                     optimizer.zero_grad()
-                    # step lr scheduler every batch
-                    # this is different from standard pytorch behavior
                     lr_scheduler.step()
 
                     # update Exponential Moving Average of the model weights
@@ -692,30 +689,39 @@ if TRAIN:
                     loss_cpu = loss.item()
                     epoch_loss.append(loss_cpu)
                     tepoch.set_postfix(loss=loss_cpu)
-            tglobal.set_postfix(loss=np.mean(epoch_loss))
+            
+            # After each epoch, calculate the mean loss and store it
+            mean_epoch_loss = np.mean(epoch_loss)
+            training_losses.append(mean_epoch_loss)
+            tglobal.set_postfix(loss=mean_epoch_loss)
 
     # Weights of the EMA model
-    # is used for inference
     ema_noise_pred_net = noise_pred_net
     ema.copy_to(ema_noise_pred_net.parameters())
-
 
     save_path = "saved_models"
     os.makedirs(save_path, exist_ok=True)
 
-    # Save EMA-updated model (used for inference)
-    ema.copy_to(noise_pred_net.parameters())  # ensure ema weights are copied
     torch.save(noise_pred_net.state_dict(), os.path.join(save_path, "ema_noise_pred_net.pth"))
 
-    # Optional: Save optimizer and scheduler too (for checkpointing/resuming)
     torch.save({
         'model_state_dict': noise_pred_net.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'lr_scheduler_state_dict': lr_scheduler.state_dict(),
         'epoch': num_epochs,
+        'training_losses': training_losses # Save the training losses
     }, os.path.join(save_path, "checkpoint.pth"))
 
+    print("Training complete. Plotting training loss...")
 
+    # Plotting the training loss
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, num_epochs + 1), training_losses, marker='o', linestyle='-', color='b')
+    plt.title('Training Loss Over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Epoch Loss')
+    plt.grid(True)
+    plt.show()
 
 #%% Inference / Evaluation when TRAIN is False
 import os
@@ -757,9 +763,9 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 # pred_horizon, obs_horizon, action_horizon, action_dim,
 # num_diffusion_iters, device
 
-max_steps = 100
+max_steps = 200
 env       = LandingEnv()
-env.dt = 0.5
+env.dt = 0.1
 obs, info = env.reset(), {}
 
 obs_deque = deque([obs] * obs_horizon, maxlen=obs_horizon)

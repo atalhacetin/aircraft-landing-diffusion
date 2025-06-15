@@ -19,12 +19,12 @@ def aircraft_dynamics(x: np.ndarray, u: np.ndarray) -> np.ndarray:
     X, Y, H, V, psi, gamma = x
     n_x, n_z, mu = u
     dx = np.zeros(6)
-    dx[0] = V * np.cos(psi) * np.cos(gamma)             # ẋ
-    dx[1] = V * np.sin(psi) * np.cos(gamma)             # ẏ
-    dx[2] = V * np.sin(gamma)                           # ḣ
-    dx[3] = g * (n_x - np.sin(gamma))                   # V̇
-    dx[4] = g * n_z / V * np.sin(mu) / np.cos(gamma)    # ψ̇
-    dx[5] = g / V * (n_z * np.cos(mu) - np.cos(gamma))  # γ̇
+    dx[0] = V * np.cos(psi) * np.cos(gamma)             # x_dot
+    dx[1] = V * np.sin(psi) * np.cos(gamma)             # y_dot
+    dx[2] = V * np.sin(gamma)                           # h_dot
+    dx[3] = g * (n_x - np.sin(gamma))                   # V_dot
+    dx[4] = g * n_z / V * np.sin(mu) / np.cos(gamma)    # psi_dot
+    dx[5] = g / V * (n_z * np.cos(mu) - np.cos(gamma))  # gamma_dot
     return dx
 
 class LandingEnv(gym.Env):
@@ -54,7 +54,7 @@ class LandingEnv(gym.Env):
         self.V_ref = 70.0
 
         # PD gains (tune as needed)
-        self.Kp_psi,   self.Kd_psi   = 0.1, 0.5    # heading → bank angle μ
+        self.Kp_psi,   self.Kd_psi   = 0.1, 0.5    # heading → bank angle mu
         self.Kp_h,     self.Kd_h     = 0.1, 0.2    # altitude → normal load factor n_z
         self.Kp_v                = 1.0            # speed → longitudinal load factor n_x
 
